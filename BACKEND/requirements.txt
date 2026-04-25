@@ -1,0 +1,24 @@
+# Core Framework
+fastapi
+uvicorn
+python-multipart
+python-magic  # Use python-magic-bin on Windows
+
+# AI & Processing
+groq
+pytesseract
+opencv-python
+pdf2image
+numpy
+
+# Web Scraping
+requests
+beautifulsoup4
+selenium
+webdriver-manager
+tenacity
+
+# Data & PDF Export
+pandas
+weasyprint
+python-dotenv
