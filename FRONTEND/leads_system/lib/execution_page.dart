@@ -232,6 +232,19 @@ class _ExecutionPageState extends State<ExecutionPage> {
     setState(() => _capturePending = false);
 
     if (captured != null && captured.isNotEmpty) {
+      // DEBUG — print the raw string exactly as received from VisualTrainerPage
+      // so we can confirm nothing was truncated between Navigator.pop and here.
+      debugPrint('');
+      debugPrint('╔══════════════════════════════════════════════════════════');
+      debugPrint('║ [ExecutionPage] _openSelectorCapture ← received from VisualTrainer');
+      debugPrint('║ Total chars: ${captured.length}');
+      debugPrint('╠══════════════════════════════════════════════════════════');
+      for (int _i = 0; _i < captured.length; _i += 200) {
+        debugPrint('║ ${captured.substring(_i, _i + 200 > captured.length ? captured.length : _i + 200)}');
+      }
+      debugPrint('╚══════════════════════════════════════════════════════════');
+      debugPrint('');
+
       // Format from webview mode:  "selector|elementHtml"
       // Format from manual mode:   "selector|elementHtml||paginationHtml"
       // Split on first '|' for selector, remainder for html.
@@ -242,17 +255,43 @@ class _ExecutionPageState extends State<ExecutionPage> {
       final rest     = pipeIdx >= 0 ? captured.substring(pipeIdx + 1) : '';
 
       // Check for manual-mode pagination payload ("elementHtml||paginationHtml")
-      final doublePipe  = rest.indexOf('||');
-      final html        = doublePipe >= 0 ? rest.substring(0, doublePipe) : rest;
+      final doublePipe    = rest.indexOf('||');
+      final html          = doublePipe >= 0 ? rest.substring(0, doublePipe) : rest;
       final manualPagHtml = doublePipe >= 0 ? rest.substring(doublePipe + 2) : '';
 
-      // If manual mode sent pagination HTML and we don't yet have a pagination
-      // selector captured, auto-fill it so the user doesn't have to open the
-      // inspector a second time just for pagination.
+      // When manual mode is used, vt.dart sends '__manual__' as the selector
+      // sentinel so ExecutionPage knows to derive a real CSS selector from the
+      // element HTML instead of using a click-generated CSS path (which doesn't
+      // exist for pasted HTML). We resolve it here so '__manual__' never reaches
+      // the recipe review, the logs, _startSystem, or the backend.
+      String resolvedSelector = selector;
+      if (selector == '__manual__' && html.isNotEmpty) {
+        // Extract tag name and first meaningful class from the pasted outerHTML,
+        // exactly the same derivation used for pagination below.
+        final elTagMatch   = RegExp(r'^<([a-zA-Z][a-zA-Z0-9]*)').firstMatch(html);
+        
+        // FIX: Removed the 'r' prefix so the escaped single quotes evaluate correctly
+        final elClassMatch = RegExp('class=["\']([^"\']+)["\']').firstMatch(html);
+        
+        final elTag        = elTagMatch?.group(1)?.toLowerCase() ?? 'div';
+        final elClass      = elClassMatch?.group(1)?.split(RegExp(r'\s+'))
+                                  .where((c) => c.isNotEmpty).first ?? '';
+                                  
+        // Prefer id over class when present — more specific and stable.
+        // FIX: Removed 'r' and escaped the backslash for '\\b' (word boundary)
+        final elIdMatch    = RegExp('\\bid=["\']([^"\']+)["\']').firstMatch(html);
+        
+        final elId         = elIdMatch?.group(1) ?? '';
+        resolvedSelector   = elId.isNotEmpty
+            ? '$elTag#$elId'
+            : (elClass.isNotEmpty ? '$elTag.$elClass' : elTag);
+      }
+      
+      // Auto-fill pagination selector from manual-entry pagination HTML.
       if (manualPagHtml.isNotEmpty && _paginationSelector == null) {
         final pagTagMatch   = RegExp(r'^<([a-zA-Z][a-zA-Z0-9]*)').firstMatch(manualPagHtml);
         
-        // FIX: Removed 'r' prefix here to allow proper escaping of single quotes
+        // FIX: Removed the 'r' prefix so the escaped single quotes evaluate correctly
         final pagClassMatch = RegExp('class=["\']([^"\']+)["\']').firstMatch(manualPagHtml);
         
         final pagTag        = pagTagMatch?.group(1)?.toLowerCase() ?? 'a';
@@ -270,7 +309,30 @@ class _ExecutionPageState extends State<ExecutionPage> {
         _addLog('Auto-filled pagination from manual entry: $pagSel');
       }
 
-      onCapture(selector, html);
+      // DEBUG — print exactly what is handed to the onCapture callback so we
+      // can confirm the selector and full HTML that will be stored in
+      // _primarySelector / _paginationSelector and later POSTed to the backend.
+      debugPrint('');
+      debugPrint('╔══════════════════════════════════════════════════════════');
+      debugPrint('║ [ExecutionPage] onCapture() ARGUMENTS');
+      debugPrint('╠══════════════════════════════════════════════════════════');
+      debugPrint('║ resolvedSelector : $resolvedSelector');
+      debugPrint('║ html (${html.length} chars):');
+      for (int _i = 0; _i < html.length; _i += 200) {
+        debugPrint('║   ${html.substring(_i, _i + 200 > html.length ? html.length : _i + 200)}');
+      }
+      if (manualPagHtml.isNotEmpty) {
+        debugPrint('╠══════════════════════════════════════════════════════════');
+        debugPrint('║ manualPagHtml (${manualPagHtml.length} chars):');
+        for (int _i = 0; _i < manualPagHtml.length; _i += 200) {
+          debugPrint('║   ${manualPagHtml.substring(_i, _i + 200 > manualPagHtml.length ? manualPagHtml.length : _i + 200)}');
+        }
+      }
+      debugPrint('╚══════════════════════════════════════════════════════════');
+      debugPrint('');
+
+      // Pass the resolved (never '__manual__') selector to the capture callback.
+      onCapture(resolvedSelector, html);
     } else {
       _addLog('User: Selector capture cancelled for "$label".');
     }
@@ -446,10 +508,24 @@ class _ExecutionPageState extends State<ExecutionPage> {
     };
 
     try {
+      // DEBUG — print the full JSON body about to be POSTed to /tasks/start.
+      // This is the last point in Dart before the data leaves the app.
+      final _recipeDebug = jsonEncode(recipe);
+      debugPrint('');
+      debugPrint('╔══════════════════════════════════════════════════════════');
+      debugPrint('║ [ExecutionPage] _startSystem → POST /tasks/start');
+      debugPrint('║ Body (${_recipeDebug.length} chars):');
+      debugPrint('╠══════════════════════════════════════════════════════════');
+      for (int _i = 0; _i < _recipeDebug.length; _i += 200) {
+        debugPrint('║ ${_recipeDebug.substring(_i, _i + 200 > _recipeDebug.length ? _recipeDebug.length : _i + 200)}');
+      }
+      debugPrint('╚══════════════════════════════════════════════════════════');
+      debugPrint('');
+
       final response = await http.post(
         Uri.parse('$_baseUrl/tasks/${widget.taskId}/start'),
         headers: {'X-API-KEY': _apiKey, 'Content-Type': 'application/json'},
-        body: jsonEncode(recipe),
+        body: _recipeDebug,
       );
 
       if (!mounted) return;

@@ -397,27 +397,56 @@ class _VisualTrainerPageState extends State<VisualTrainerPage> {
     String html;
 
     if (_manualMode) {
-      // Manual mode: derive a minimal CSS selector from the element HTML the
-      // user pasted, then use the raw HTML as the evidence for Groq.
+      // Raw HTML exactly as the user pasted it — this is what Groq receives.
       html = _manualElementCtrl.text.trim();
       if (html.isEmpty) return;
 
-      // Best-effort: extract tag + first class from the pasted HTML so we
-      // have something for the selector field.  Groq will refine it anyway.
-      final tagMatch   = RegExp(r'^<([a-zA-Z][a-zA-Z0-9]*)').firstMatch(html);
-      
-      // FIX: Removed 'r' prefix here to allow proper escaping of single quotes
-      final classMatch = RegExp('class=["\']([^"\']+)["\']').firstMatch(html);
-      
-      final tag        = tagMatch?.group(1)?.toLowerCase() ?? 'div';
-      final firstClass = classMatch?.group(1)?.split(RegExp(r'\s+'))
-                              .where((c) => c.isNotEmpty).first ?? '';
-      sel = firstClass.isNotEmpty ? '$tag.$firstClass' : tag;
+      // DEBUG — print the raw text from each controller exactly as Flutter
+      // received it from the user.  The === delimiters let you see if the
+      // string was truncated, had its whitespace stripped, or arrived empty.
+      debugPrint('');
+      debugPrint('╔══════════════════════════════════════════════════════════');
+      debugPrint('║ [VisualTrainer] _useSelector → MANUAL MODE PAYLOAD');
+      debugPrint('╠══════════════════════════════════════════════════════════');
+      debugPrint('║ ELEMENT HTML (${html.length} chars):');
+      // Print in 200-char chunks so long HTML is never cut off by the console
+      for (int _i = 0; _i < html.length; _i += 200) {
+        debugPrint('║   ${html.substring(_i, _i + 200 > html.length ? html.length : _i + 200)}');
+      }
+      debugPrint('╠══════════════════════════════════════════════════════════');
+      final _pagDebug = _manualPaginationCtrl.text.trim();
+      debugPrint('║ PAGINATION HTML (${_pagDebug.length} chars):');
+      for (int _i = 0; _i < _pagDebug.length; _i += 200) {
+        debugPrint('║   ${_pagDebug.substring(_i, _i + 200 > _pagDebug.length ? _pagDebug.length : _i + 200)}');
+      }
+      debugPrint('╠══════════════════════════════════════════════════════════');
+      debugPrint('║ SENTINEL SELECTOR: __manual__');
+      debugPrint('╚══════════════════════════════════════════════════════════');
+      debugPrint('');
 
-      // Append pagination HTML with a separator so ExecutionPage can split it.
-      // Format returned:  "<css_sel>|<elementHtml>||<paginationHtml>"
+      // Use a sentinel selector so the backend knows Groq must derive the
+      // real selector from element_html, not from this string.
+      // "__manual__" is checked in listings_site.py (Patch 3 below).
+      sel = '__manual__';
+
       final pag = _manualPaginationCtrl.text.trim();
-      Navigator.pop(context, '$sel|$html||$pag');
+      
+      // DEBUG — print the exact string being returned to ExecutionPage.
+      // This lets you verify the pipe-delimited format is intact and that
+      // the full HTML (not just the first word/class) is in the payload.
+      final _returnStr = '$sel|$html||$pag';
+      debugPrint('');
+      debugPrint('╔══════════════════════════════════════════════════════════');
+      debugPrint('║ [VisualTrainer] Navigator.pop PAYLOAD (${_returnStr.length} chars total)');
+      debugPrint('║ Format: <sentinel>|<elementHtml>||<paginationHtml>');
+      debugPrint('╠══════════════════════════════════════════════════════════');
+      for (int _i = 0; _i < _returnStr.length; _i += 200) {
+        debugPrint('║ ${_returnStr.substring(_i, _i + 200 > _returnStr.length ? _returnStr.length : _i + 200)}');
+      }
+      debugPrint('╚══════════════════════════════════════════════════════════');
+      debugPrint('');
+      Navigator.pop(context, _returnStr); // replace the old Navigator.pop line
+      
     } else {
       // Webview mode: use the inspector-captured values as before.
       sel  = _liveSelector ?? '';
@@ -429,6 +458,7 @@ class _VisualTrainerPageState extends State<VisualTrainerPage> {
       Navigator.pop(context, '$sel|$html');
     }
   }
+  
   // ── Clear lock (re-pick) ────────────────────────────────────────────────────
   Future<void> _clearLock() async {
     try {

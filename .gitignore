@@ -1,0 +1,14 @@
+# Miscellaneous temp folder
+New folder/
+
+# Python virtual environment
+BACKEND/venv/
+
+# Flutter Windows runner (generated, not committed)
+FRONTEND/leads_system/windows/
+
+# Flutter build output
+FRONTEND/leads_system/build/
+
+# Flutter tool cache (generated)
+FRONTEND/leads_system/.dart_tool/

@@ -161,16 +161,23 @@ class ListingsSiteAgent:
         #    live page and extract its parent's innerHTML so Groq sees siblings.
         page_html_context = ""
         primary_sel = raw_recipe.get("primary_selector", "")
-        try:
-            soup = BeautifulSoup(self.driver.page_source, "html.parser")
-            match = soup.select_one(primary_sel) if primary_sel else None
-            if match and match.parent:
-                # Up to 1500 chars of the parent container (shows sibling rows)
-                page_html_context = str(match.parent)[:1500]
-            elif match:
-                page_html_context = str(match)[:1500]
-        except Exception:
-            page_html_context = ""
+
+        # When manual mode sent "__manual__" we cannot use it as a CSS selector.
+        # Fall back to the raw element_html["primary"] value itself — Groq will
+        # have the full HTML and can infer sibling structure from it.
+        if primary_sel and primary_sel != "__manual__":
+            try:
+                soup  = BeautifulSoup(self.driver.page_source, "html.parser")
+                match = soup.select_one(primary_sel)
+                if match and match.parent:
+                    page_html_context = str(match.parent)[:1500]
+                elif match:
+                    page_html_context = str(match)[:1500]
+            except Exception:
+                page_html_context = ""
+        else:
+            # Use the manually-pasted element HTML as context so Groq is not blind.
+            page_html_context = element_html.get("primary", "")[:1500]
 
         user_selectors = {
             "primary_selector":    raw_recipe.get("primary_selector",    ""),

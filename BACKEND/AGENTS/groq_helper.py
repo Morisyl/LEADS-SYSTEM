@@ -46,13 +46,50 @@ class GroqRecipeParser:
             tier, site_url, element_html, user_selectors, page_html_context
         )
 
+        # DEBUG — print everything received by generate_recipe so we can
+        # confirm the full HTML arrived from the Dart side intact.
+        print("\n" + "═" * 70)
+        print(f"[GroqHelper] generate_recipe() CALLED")
+        print(f"  tier     : {tier}")
+        print(f"  site_url : {site_url}")
+        print("─" * 70)
+        print(f"  element_html['primary']    ({len(element_html.get('primary',''))} chars):")
+        print(element_html.get("primary", "«EMPTY»"))
+        print("─" * 70)
+        print(f"  element_html['pagination'] ({len(element_html.get('pagination',''))} chars):")
+        print(element_html.get("pagination", "«EMPTY»"))
+        print("─" * 70)
+        print(f"  user_selectors: {user_selectors}")
+        print("─" * 70)
+        print(f"  page_html_context ({len(page_html_context)} chars):")
+        print(page_html_context[:500] if page_html_context else "«EMPTY»")
+        print("═" * 70 + "\n")
+
         try:
+            # DEBUG — print the full prompt being sent to Groq.
+            # If this shows "mkjsa" then the element_html never arrived correctly.
+            # If it shows the real HTML, the problem is in Groq's response parsing.
+            print("\n" + "═" * 70)
+            print("[GroqHelper] PROMPT SENT TO GROQ:")
+            print("─" * 70)
+            print(prompt)   # full prompt, no truncation
+            print("═" * 70 + "\n")
+
             resp = self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model=self.model,
                 response_format={"type": "json_object"},
             )
             raw    = resp.choices[0].message.content
+
+            # DEBUG — print the raw string Groq returned before any parsing.
+            # If json.loads fails, this is what caused it.
+            print("\n" + "═" * 70)
+            print("[GroqHelper] RAW GROQ RESPONSE:")
+            print("─" * 70)
+            print(raw)      # full response, no truncation
+            print("═" * 70 + "\n")
+
             recipe = json.loads(raw)
             print(f"[Groq] Raw recipe for Tier {tier}:\n{json.dumps(recipe, indent=2)}")
             return self._validate_and_fill(tier, recipe, user_selectors)
@@ -114,23 +151,57 @@ OUTPUT JSON keys: tier, primary_selector, regex_pattern, extract_field,
             3: """TIER 3 — Only company names are visible; no emails on the site.
 GOAL: Extract company NAME TEXT from each listing row → pass to Serper search engine
       → find company websites → scrape emails from those websites.
-- primary_selector  : CSS selector for the element whose visible TEXT is the company name.
-- regex_pattern     : Python regex to clean / validate extracted company name strings.
+- primary_selector  : CSS selector matching the ROOT (outermost) element of the
+                      PRIMARY ELEMENT HTML block above.  BeautifulSoup will call
+                      soup.select(primary_selector) to get a list of all rows, then
+                      call get_text(strip=True) on each matched element to get the
+                      company name.  DO NOT select a child <a> or <span> — select
+                      the container row element so that ALL rows are matched at once.
+- regex_pattern     : Python regex to clean / validate extracted name strings.
                       Default: r'[A-Za-z0-9 &.,()\\-]+'
-- extract_field     : "text" (get_text(strip=True) on the matched element)
-- pagination_selector: CSS selector for the Next-page element.
-- pagination_href   : true if plain href, false if JS button.
-- method            : "BS4" or "SELENIUM".
+- extract_field     : "text"
+- pagination_selector: Valid CSS selector for the Next-page <a> link derived from
+                      the PAGINATION ELEMENT HTML above.  Must be syntactically
+                      correct — every class name must be preceded by a dot.
+- pagination_href   : true if the next-page element has a plain href, false if JS.
+- method            : "BS4" if pagination_href is true, otherwise "SELENIUM".
 OUTPUT JSON keys: tier, primary_selector, regex_pattern, extract_field,
                   pagination_selector, pagination_href, method""",
         }
 
-        # ── HTML evidence section ─────────────────────────────────────────────
+        # Pull the root tag and root classes from primary_html so we can tell
+        # Groq exactly what selector the root element produces — it must not
+        # invent a selector from a child element it finds inside the HTML block.
+        import re as _re
+        _root_tag   = (_re.match(r'<([a-zA-Z][a-zA-Z0-9]*)', primary_html or '') or [None,''])[1].lower() or 'div'
+        _root_cls_m = _re.search(r'class=["\']([^"\']+)["\']', primary_html or '')
+        _root_cls   = ' '.join(
+            c for c in (_root_cls_m.group(1).split() if _root_cls_m else [])
+            if not c.startswith('__leads')
+        )
+        # Build a concrete selector from the root element so Groq has no ambiguity.
+        # e.g.  "div.flex.items-center.gap-4"
+        _root_selector = _root_tag + ('.' + '.'.join(_root_cls.split()[:3]) if _root_cls else '')
+
         html_section = f"""
-=== PRIMARY ELEMENT (user clicked this — what you must target) ===
+=== PRIMARY ELEMENT — THE EXACT HTML BLOCK THE USER PROVIDED ===
+CRITICAL RULE: Your primary_selector MUST match the OUTERMOST (root) tag of this
+HTML block, not any child element inside it.  The root element here is:
+  <{_root_tag}> with classes: "{_root_cls}"
+  Suggested selector from root: "{_root_selector}"
+Use this selector (or a simpler equivalent that matches ALL similar rows on the
+page) as primary_selector.  Do NOT select a child <a>, <span>, or <td> inside it.
+
 {primary_html[:1500] if primary_html else "NOT PROVIDED"}
 
-=== PAGINATION ELEMENT (user clicked this — how to get to next page) ===
+=== PAGINATION ELEMENT — THE EXACT HTML THE USER PROVIDED ===
+CRITICAL RULE: Derive pagination_selector from the root tag of this HTML block.
+If pagination is a <ul> or <li> container, select the <a> INSIDE the non-active
+<li> that has an href — that is the "next page" link.
+Ensure the CSS selector is syntactically valid: every class must be preceded by a dot.
+Example of INVALID selector: "ul.pagination enf-pagination li a"  ← missing dot
+Example of VALID   selector: "ul.pagination.enf-pagination li a"  ← correct
+
 {pagination_html[:800] if pagination_html else "NOT PROVIDED"}
 """
         if subpage_html:
@@ -140,9 +211,32 @@ OUTPUT JSON keys: tier, primary_selector, regex_pattern, extract_field,
 """
         if page_html_context:
             html_section += f"""
-=== SURROUNDING PAGE CONTEXT (siblings of the primary element) ===
+=== SURROUNDING PAGE CONTEXT (sibling rows — use to generalise the selector) ===
 {page_html_context[:1500]}
 """
+
+        # ── HTML evidence section ─────────────────────────────────────────────
+        if subpage_html:
+            html_section += f"""
+=== SUBPAGE ELEMENT (user clicked this inside a subpage) ===
+{subpage_html[:800]}
+"""
+        if page_html_context:
+            html_section += f"""
+=== SURROUNDING PAGE CONTEXT (sibling rows — use to generalise the selector) ===
+{page_html_context[:1500]}
+"""
+
+        # Omit the user_selectors block entirely when the primary HTML is available —
+        # Groq must derive the selector from the HTML, not from a possibly-wrong string.
+        _has_primary_html = bool(element_html.get("primary", "").strip())
+        _selector_note = (
+            "IMPORTANT: User selectors are NOT provided for this run. "
+            "Derive primary_selector and pagination_selector ONLY from the HTML elements below."
+            if _has_primary_html
+            else f"USER-PROVIDED CSS SELECTORS (fallback only — prefer HTML evidence above):\n"
+                 f"{json.dumps(user_selectors, indent=2)}"
+        )
 
         return f"""You are an expert web-scraping engineer helping build a B2B leads extraction system.
 
@@ -155,8 +249,52 @@ Your job is to produce a validated extraction recipe as a JSON object.
 
 {tier_desc.get(tier, "")}
 
-USER-PROVIDED CSS SELECTORS (auto-generated from click position — verify against the HTML):
-{json.dumps(user_selectors, indent=2)}
+{_selector_note}
+
+{html_section}
+
+VALIDATION RULES:
+1. Return ONLY valid JSON — no markdown, no prose, no code fences.
+2. primary_selector MUST be derived from the ROOT TAG of the PRIMARY ELEMENT HTML.
+   - The root tag is the first opening tag in that HTML block (e.g. <div>, <li>, <tr>).
+   - NEVER select a child element (e.g. inner <a>, <span>, <td>) as primary_selector.
+   - The selector must match ALL similar rows on the page, not just the one example.
+   - Remove :nth-child qualifiers — they make the selector match only one row.
+3. pagination_selector MUST be syntactically valid CSS:
+   - Every class name must have a dot prefix: "ul.pagination.enf-pagination li a" not
+     "ul.pagination enf-pagination li a" (missing dot = invalid = matches nothing).
+   - Target the <a> tag inside the non-active next-page <li> that has an href.
+4. For pagination: if the next-page <a> has an href that is not "javascript:…",
+   set pagination_href=true and method="BS4".  Otherwise set method="SELENIUM".
+5. regex_pattern must be a valid Python regex string with escaped backslashes.
+6. All required selector values must be non-empty strings.
+   Use "" ONLY for genuinely optional fields (subpage_selector, last_page_selector).
+7. Simpler selectors are more robust — prefer tag.class over long :nth-child chains.
+"""
+
+        # Omit the user_selectors block entirely when the primary HTML is available —
+        # Groq must derive the selector from the HTML, not from a possibly-wrong string.
+        _has_primary_html = bool(element_html.get("primary", "").strip())
+        _selector_note = (
+            "IMPORTANT: User selectors are NOT provided for this run. "
+            "Derive primary_selector and pagination_selector ONLY from the HTML elements below."
+            if _has_primary_html
+            else f"USER-PROVIDED CSS SELECTORS (fallback only — prefer HTML evidence above):\n"
+                 f"{json.dumps(user_selectors, indent=2)}"
+        )
+
+        return f"""You are an expert web-scraping engineer helping build a B2B leads extraction system.
+
+A user has clicked elements on the page at:
+  URL: {site_url}
+
+They clicked specific elements to indicate what they want to extract and how to paginate.
+The exact outerHTML of each clicked element is provided below.
+Your job is to produce a validated extraction recipe as a JSON object.
+
+{tier_desc.get(tier, "")}
+
+{_selector_note}
 
 {html_section}
 
@@ -177,7 +315,6 @@ VALIDATION RULES:
    do not apply.
 6. Simpler selectors are more robust — prefer tag.class over long :nth-child chains.
 """
-
     # ─────────────────────────────────────────────────────────────────────────
     # Post-processing helpers
     # ─────────────────────────────────────────────────────────────────────────
@@ -198,11 +335,17 @@ VALIDATION RULES:
                 "regex_pattern", "extract_field"],
         }
 
+        # Strip the manual-mode sentinel so it can never propagate into the recipe.
+        # If Groq left a field empty and the only fallback is "__manual__", leave
+        # the field empty — it is better for extraction to skip than to use garbage.
+        def _clean(val: str) -> str:
+            return "" if val.strip() == "__manual__" else val.strip()
+
         fallback_selectors = {
-            "primary_selector":    user_selectors.get("primary_selector",    ""),
-            "pagination_selector": user_selectors.get("pagination_selector", ""),
-            "subpage_selector":    user_selectors.get("subpage_selector",    ""),
-            "last_page_selector":  user_selectors.get("last_page_selector",  ""),
+            "primary_selector":    _clean(user_selectors.get("primary_selector",    "")),
+            "pagination_selector": _clean(user_selectors.get("pagination_selector", "")),
+            "subpage_selector":    _clean(user_selectors.get("subpage_selector",    "")),
+            "last_page_selector":  _clean(user_selectors.get("last_page_selector",  "")),
         }
 
         for key in required_by_tier.get(tier, []):
@@ -222,6 +365,35 @@ VALIDATION RULES:
         # Normalise method
         method = recipe.get("method", "SELENIUM").upper().strip()
         recipe["method"] = method if method in ("BS4", "SELENIUM") else "SELENIUM"
+
+        # Fix a common Groq mistake: pagination_selector with a space before a class
+        # name instead of a dot (e.g. "ul.pagination enf-pagination li a").
+        # Repair by replacing any "word space word" boundary where the second token
+        # looks like a bare class name (no dot/# prefix) with "word.word".
+        pag_sel = recipe.get("pagination_selector", "")
+        if pag_sel:
+            import re as _re2
+            def _fix_css(sel):
+                # Insert a dot before any bare word that follows a space and is
+                # preceded by a CSS token (tag or classed element), not a combinator.
+                # Combinators are: space (descendant), >, +, ~
+                # We only fix the case of "word space bareword" where bareword has
+                # no leading . # [ : — i.e. it is a missing-dot class name.
+                return _re2.sub(
+                    r'(?<=[\w\-])(\s+)(?=[a-zA-Z][a-zA-Z0-9\-]*(?:\s|$|\.|\[|:))',
+                    lambda m: m.group(1),  # keep descendant combinator as-is
+                    sel
+                )
+            # Simpler targeted fix: "pagination enf-pagination" → "pagination.enf-pagination"
+            # Pattern: two adjacent CSS class-like words separated only by a space
+            pag_sel_fixed = _re2.sub(
+                r'(?<=[a-zA-Z0-9\-])( )(?=[a-zA-Z][a-zA-Z0-9\-]+(?:\s+[a-zA-Z]|\s*$))',
+                '.',
+                pag_sel,
+            )
+            if pag_sel_fixed != pag_sel:
+                print(f"[GroqHelper] Auto-fixed pagination_selector: '{pag_sel}' → '{pag_sel_fixed}'")
+            recipe["pagination_selector"] = pag_sel_fixed
 
         # Ensure optional keys exist
         recipe.setdefault("last_page_selector", "")
@@ -249,7 +421,10 @@ VALIDATION RULES:
 
         base = {
             "tier":               tier,
-            "primary_selector":   user_selectors.get("primary_selector",    ""),
+            # Strip the manual sentinel defensively — primary_selector must always
+            # be a real CSS selector string that BeautifulSoup/Selenium can use.
+            "primary_selector":   "" if user_selectors.get("primary_selector", "").strip() == "__manual__"
+                                     else user_selectors.get("primary_selector", ""),
             "pagination_selector":user_selectors.get("pagination_selector", ""),
             "method":             "BS4" if is_href else "SELENIUM",
             "pagination_href":    is_href,
