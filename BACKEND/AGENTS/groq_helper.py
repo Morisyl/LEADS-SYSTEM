@@ -110,68 +110,62 @@ class GroqRecipeParser:
         user_selectors: dict,
         page_html_context: str,
     ) -> str:
-
         primary_html    = element_html.get("primary",    "").strip()
         pagination_html = element_html.get("pagination", "").strip()
         subpage_html    = element_html.get("subpage",    "").strip()
 
-        # ── Per-tier task description ────────────────────────────────────────
         tier_desc = {
             1: """TIER 1 — Emails are directly visible on the main listing page.
-GOAL: Extract email addresses from each listing row/card.
-- primary_selector  : CSS selector for the CONTAINER element of one listing row/card
-                      (the element the user clicked). BeautifulSoup will .select() this
-                      to get a list of items, then scan each for emails.
-- regex_pattern     : Python regex to extract email addresses from the container's text.
-                      Default: r'[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}'
-- extract_field     : "email"
+GOAL: Extract email addresses from each listing row/card using DOM parsing.
+- primary_selector : CSS selector for the CONTAINER element of one row/card.
+                     BS4 calls soup.select(primary_selector) → iterates each element.
+- target_attribute : EXACTLY one of "text", "href", or "content".
+                     Use "href" if the email is inside a mailto: link attribute.
+                     Use "text" if the email appears as visible text in the element.
+- regex_pattern    : Python regex applied to the raw extracted string to CLEAN it.
+                     For mailto hrefs: r"mailto:(.*)" — capture group 1 gives the address.
+                     For visible text: r"[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}"
 - pagination_selector: CSS selector for the Next-page <a> tag or JS button.
-- pagination_href   : true if Next is a plain <a href=...>, false if JS button.
-- method            : "BS4" if pagination is a plain href, "SELENIUM" if JS-driven.
-- last_page_selector: CSS selector for the disabled / hidden Next indicator (or "").
-OUTPUT JSON keys: tier, primary_selector, regex_pattern, extract_field,
+- pagination_href  : true if Next is a plain <a href=...>, false if JS button.
+- method           : "BS4" if pagination is a plain href, "SELENIUM" if JS-driven.
+- last_page_selector: CSS selector for the disabled Next indicator (or "").
+OUTPUT JSON keys: tier, primary_selector, target_attribute, regex_pattern,
                   pagination_selector, pagination_href, method, last_page_selector""",
 
             2: """TIER 2 — Emails are inside per-company subpages linked from the listing.
-GOAL: From the MAIN PAGE collect all subpage links → visit each subpage → extract emails.
-- primary_selector  : CSS selector for the <a> link element on the MAIN page that
-                      leads to the company subpage. Must resolve to elements with href.
-- regex_pattern     : Python regex to extract email addresses from the subpage HTML.
-                      Default: r'[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}'
-- extract_field     : "email"
-- subpage_selector  : CSS selector to narrow the search area INSIDE the subpage
-                      (e.g. '.contact-section', 'div.company-details').
-                      Use "" to scan the full subpage.
+GOAL: From the MAIN PAGE collect all subpage links → visit each → extract emails.
+- primary_selector : CSS selector for the <a> link element on the MAIN page that
+                     leads to the company subpage.
+- target_attribute : For collecting subpage links this is always "href".
+                     On the subpage itself, use "href" for mailto links or "text"
+                     for visible email addresses.
+- regex_pattern    : Python regex to clean the extracted string.
+                     For mailto hrefs: r"mailto:(.*)"
+                     For visible text: r"[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}"
+- subpage_selector : CSS selector to narrow search area INSIDE the subpage (or "").
 - pagination_selector: CSS selector for the Next-page element on the MAIN page.
-- pagination_href   : true if Next is a plain href, false if JS button.
-- method            : "BS4" or "SELENIUM".
-OUTPUT JSON keys: tier, primary_selector, regex_pattern, extract_field,
+- pagination_href  : true if Next is a plain href, false if JS button.
+- method           : "BS4" or "SELENIUM".
+OUTPUT JSON keys: tier, primary_selector, target_attribute, regex_pattern,
                   subpage_selector, pagination_selector, pagination_href, method""",
 
             3: """TIER 3 — Only company names are visible; no emails on the site.
-GOAL: Extract company NAME TEXT from each listing row → pass to Serper search engine
-      → find company websites → scrape emails from those websites.
-- primary_selector  : CSS selector matching the ROOT (outermost) element of the
-                      PRIMARY ELEMENT HTML block above.  BeautifulSoup will call
-                      soup.select(primary_selector) to get a list of all rows, then
-                      call get_text(strip=True) on each matched element to get the
-                      company name.  DO NOT select a child <a> or <span> — select
-                      the container row element so that ALL rows are matched at once.
-- regex_pattern     : Python regex to clean / validate extracted name strings.
-                      Default: r'[A-Za-z0-9 &.,()\\-]+'
-- extract_field     : "text"
-- pagination_selector: Valid CSS selector for the Next-page <a> link derived from
-                      the PAGINATION ELEMENT HTML above.  Must be syntactically
-                      correct — every class name must be preceded by a dot.
-- pagination_href   : true if the next-page element has a plain href, false if JS.
-- method            : "BS4" if pagination_href is true, otherwise "SELENIUM".
-OUTPUT JSON keys: tier, primary_selector, regex_pattern, extract_field,
+GOAL: Extract company NAME TEXT from each row → Serper search → email scraping.
+- primary_selector : CSS selector matching the ROOT (outermost) element of the
+                     PRIMARY ELEMENT HTML block. soup.select(primary_selector)
+                     returns ALL rows. DO NOT select a child <a> or <span>.
+- target_attribute : Always "text" for Tier 3 — we call get_text() on each element.
+- regex_pattern    : Python regex to clean the extracted name string.
+                     Default: r"[A-Za-z0-9 &.,()\\-]+"
+                     Use r".+" if the text is already clean (just validates non-empty).
+- pagination_selector: Valid CSS selector for the Next-page <a> link.
+                     Every class must be preceded by a dot.
+- pagination_href  : true if the next-page element has a plain href, false if JS.
+- method           : "BS4" if pagination_href is true, otherwise "SELENIUM".
+OUTPUT JSON keys: tier, primary_selector, target_attribute, regex_pattern,
                   pagination_selector, pagination_href, method""",
         }
 
-        # Pull the root tag and root classes from primary_html so we can tell
-        # Groq exactly what selector the root element produces — it must not
-        # invent a selector from a child element it finds inside the HTML block.
         import re as _re
         _root_tag   = (_re.match(r'<([a-zA-Z][a-zA-Z0-9]*)', primary_html or '') or [None,''])[1].lower() or 'div'
         _root_cls_m = _re.search(r'class=["\']([^"\']+)["\']', primary_html or '')
@@ -179,8 +173,6 @@ OUTPUT JSON keys: tier, primary_selector, regex_pattern, extract_field,
             c for c in (_root_cls_m.group(1).split() if _root_cls_m else [])
             if not c.startswith('__leads')
         )
-        # Build a concrete selector from the root element so Groq has no ambiguity.
-        # e.g.  "div.flex.items-center.gap-4"
         _root_selector = _root_tag + ('.' + '.'.join(_root_cls.split()[:3]) if _root_cls else '')
 
         html_section = f"""
@@ -215,20 +207,6 @@ Example of VALID   selector: "ul.pagination.enf-pagination li a"  ← correct
 {page_html_context[:1500]}
 """
 
-        # ── HTML evidence section ─────────────────────────────────────────────
-        if subpage_html:
-            html_section += f"""
-=== SUBPAGE ELEMENT (user clicked this inside a subpage) ===
-{subpage_html[:800]}
-"""
-        if page_html_context:
-            html_section += f"""
-=== SURROUNDING PAGE CONTEXT (sibling rows — use to generalise the selector) ===
-{page_html_context[:1500]}
-"""
-
-        # Omit the user_selectors block entirely when the primary HTML is available —
-        # Groq must derive the selector from the HTML, not from a possibly-wrong string.
         _has_primary_html = bool(element_html.get("primary", "").strip())
         _selector_note = (
             "IMPORTANT: User selectors are NOT provided for this run. "
@@ -255,65 +233,24 @@ Your job is to produce a validated extraction recipe as a JSON object.
 
 VALIDATION RULES:
 1. Return ONLY valid JSON — no markdown, no prose, no code fences.
-2. primary_selector MUST be derived from the ROOT TAG of the PRIMARY ELEMENT HTML.
-   - The root tag is the first opening tag in that HTML block (e.g. <div>, <li>, <tr>).
-   - NEVER select a child element (e.g. inner <a>, <span>, <td>) as primary_selector.
-   - The selector must match ALL similar rows on the page, not just the one example.
-   - Remove :nth-child qualifiers — they make the selector match only one row.
-3. pagination_selector MUST be syntactically valid CSS:
-   - Every class name must have a dot prefix: "ul.pagination.enf-pagination li a" not
-     "ul.pagination enf-pagination li a" (missing dot = invalid = matches nothing).
-   - Target the <a> tag inside the non-active next-page <li> that has an href.
-4. For pagination: if the next-page <a> has an href that is not "javascript:…",
-   set pagination_href=true and method="BS4".  Otherwise set method="SELENIUM".
-5. regex_pattern must be a valid Python regex string with escaped backslashes.
-6. All required selector values must be non-empty strings.
-   Use "" ONLY for genuinely optional fields (subpage_selector, last_page_selector).
-7. Simpler selectors are more robust — prefer tag.class over long :nth-child chains.
-"""
-
-        # Omit the user_selectors block entirely when the primary HTML is available —
-        # Groq must derive the selector from the HTML, not from a possibly-wrong string.
-        _has_primary_html = bool(element_html.get("primary", "").strip())
-        _selector_note = (
-            "IMPORTANT: User selectors are NOT provided for this run. "
-            "Derive primary_selector and pagination_selector ONLY from the HTML elements below."
-            if _has_primary_html
-            else f"USER-PROVIDED CSS SELECTORS (fallback only — prefer HTML evidence above):\n"
-                 f"{json.dumps(user_selectors, indent=2)}"
-        )
-
-        return f"""You are an expert web-scraping engineer helping build a B2B leads extraction system.
-
-A user has clicked elements on the page at:
-  URL: {site_url}
-
-They clicked specific elements to indicate what they want to extract and how to paginate.
-The exact outerHTML of each clicked element is provided below.
-Your job is to produce a validated extraction recipe as a JSON object.
-
-{tier_desc.get(tier, "")}
-
-{_selector_note}
-
-{html_section}
-
-VALIDATION RULES:
-1. Return ONLY valid JSON — no markdown, no prose, no code fences.
-2. Study the PRIMARY ELEMENT HTML carefully:
-   - Check its tag, class names, href, and text content.
-   - If the auto-generated CSS selector looks wrong (e.g. too specific with :nth-child,
-     or missing a key class), produce a SIMPLER, MORE ROBUST selector from the HTML.
-   - For Tier 1: the selector should match ALL rows/cards, not just one.
-   - For Tier 3: the selector must match elements whose text() IS the company name.
-3. For the pagination element: check if it has an href attribute.
-   - If href present and not "javascript:…" → set pagination_href=true, method="BS4".
-   - If no href or href="javascript:…" → set pagination_href=false, method="SELENIUM".
-4. regex_pattern must be a valid Python regex string (escape backslashes).
-5. All selector values must be non-empty strings.
-   Use "" ONLY for optional fields (subpage_selector, last_page_selector) that genuinely
-   do not apply.
-6. Simpler selectors are more robust — prefer tag.class over long :nth-child chains.
+2. primary_selector MUST match the ROOT TAG of the PRIMARY ELEMENT HTML.
+   - NEVER select a child element as primary_selector.
+   - Remove :nth-child qualifiers so the selector matches ALL rows, not just one.
+3. target_attribute MUST be exactly one of: "text", "href", or "content".
+   - "text"    → extraction calls el.get_text(separator=" ", strip=True)
+   - "href"    → extraction calls el.get("href", "").strip()
+   - "content" → extraction calls el.get("content", "").strip()
+   Choose based on WHERE the data lives in the element HTML provided.
+4. regex_pattern is applied AFTER extraction to CLEAN the raw string.
+   - If target_attribute is "href" and it's a mailto link, use r"mailto:(.*)"
+     so the capture group strips the "mailto:" prefix automatically.
+   - If the text is already clean, use r".+" (matches any non-empty string).
+   - Always escape backslashes: \\d not \d.
+5. pagination_selector MUST be syntactically valid CSS (every class preceded by a dot).
+6. For pagination: plain href → pagination_href=true, method="BS4".
+                   JS button  → pagination_href=false, method="SELENIUM".
+7. All required keys must be non-empty strings. Use "" only for optional fields.
+8. Simpler selectors are more robust — prefer tag.class over :nth-child chains.
 """
     # ─────────────────────────────────────────────────────────────────────────
     # Post-processing helpers
@@ -327,12 +264,12 @@ VALIDATION RULES:
         recipe["tier"] = tier
 
         required_by_tier = {
-            1: ["primary_selector", "pagination_selector", "method",
-                "regex_pattern", "extract_field"],
-            2: ["primary_selector", "pagination_selector", "subpage_selector",
-                "method", "regex_pattern", "extract_field"],
-            3: ["primary_selector", "pagination_selector", "method",
-                "regex_pattern", "extract_field"],
+            1: ["primary_selector", "target_attribute", "pagination_selector",
+                "method", "regex_pattern"],
+            2: ["primary_selector", "target_attribute", "pagination_selector",
+                "subpage_selector", "method", "regex_pattern"],
+            3: ["primary_selector", "target_attribute", "pagination_selector",
+                "method", "regex_pattern"],
         }
 
         # Strip the manual-mode sentinel so it can never propagate into the recipe.
@@ -362,6 +299,13 @@ VALIDATION RULES:
         if not recipe.get("extract_field"):
             recipe["extract_field"] = "email" if tier in (1, 2) else "text"
 
+        # Default target_attribute when Groq omits it.
+        # Tier 1/2 email extraction defaults to "text" (visible address) unless
+        # the primary HTML shows a mailto href, in which case Groq should have
+        # set "href" — we leave that to Groq and only provide a safe fallback.
+        if not recipe.get("target_attribute"):
+            recipe["target_attribute"] = "text"
+
         # Normalise method
         method = recipe.get("method", "SELENIUM").upper().strip()
         recipe["method"] = method if method in ("BS4", "SELENIUM") else "SELENIUM"
@@ -370,6 +314,7 @@ VALIDATION RULES:
         # name instead of a dot (e.g. "ul.pagination enf-pagination li a").
         # Repair by replacing any "word space word" boundary where the second token
         # looks like a bare class name (no dot/# prefix) with "word.word".
+        
         pag_sel = recipe.get("pagination_selector", "")
         if pag_sel:
             import re as _re2
@@ -409,25 +354,20 @@ VALIDATION RULES:
         return recipe
 
     def _fallback_recipe(self, tier: int, user_selectors: dict, element_html: dict) -> dict:
-        """
-        When Groq fails entirely, derive the best recipe we can from what the
-        user clicked — including a safe default regex for the tier.
-        """
-        primary_html = element_html.get("primary", "")
-
-        # Try to detect pagination type from the pagination element HTML
-        pag_html = element_html.get("pagination", "")
-        is_href  = bool(re.search(r'href=["\'](?!javascript)', pag_html))
+        # Detect pagination type from the pagination_selector string itself
+        # (not from the HTML) — simpler and avoids needing the raw element HTML here.
+        pag = user_selectors.get("pagination_selector", "")
+        is_href = bool(pag) and ("a" in pag.lower() or "href" in pag.lower())
 
         base = {
             "tier":               tier,
-            # Strip the manual sentinel defensively — primary_selector must always
-            # be a real CSS selector string that BeautifulSoup/Selenium can use.
+            # Strip the manual sentinel defensively.
             "primary_selector":   "" if user_selectors.get("primary_selector", "").strip() == "__manual__"
                                      else user_selectors.get("primary_selector", ""),
             "pagination_selector":user_selectors.get("pagination_selector", ""),
             "method":             "BS4" if is_href else "SELENIUM",
             "pagination_href":    is_href,
+            "target_attribute":   "text",
             "regex_pattern": (
                 r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
                 if tier in (1, 2)
@@ -436,8 +376,8 @@ VALIDATION RULES:
             "extract_field":      "email" if tier in (1, 2) else "text",
             "last_page_selector": user_selectors.get("last_page_selector", ""),
         }
-
         if tier == 2:
             base["subpage_selector"] = user_selectors.get("subpage_selector", "")
-
-        return base
+        # Run through _validate_and_fill so all normalisation (method, pag_sel fix, etc.)
+        # is applied consistently even in the fallback path.
+        return self._validate_and_fill(tier, base, user_selectors)

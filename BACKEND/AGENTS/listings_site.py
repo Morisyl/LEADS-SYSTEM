@@ -8,9 +8,9 @@ from typing import List, Dict, Any, Set, Optional
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
+
+from selenium import webdriver                 # kept for EC / By / WebDriverWait usage below
+from seleniumbase import Driver                # replaces undetected_chromedriver; stable on Windows
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -20,7 +20,6 @@ from selenium.common.exceptions import (
     WebDriverException,
     InvalidSelectorException,
 )
-from webdriver_manager.chrome import ChromeDriverManager
 
 from .groq_helper import GroqRecipeParser
 
@@ -62,7 +61,7 @@ class ListingsSiteAgent:
         self.core  = core
         self.task_id:  Optional[str]            = None
         self.base_url: Optional[str]            = None
-        self.driver:   Optional[webdriver.Chrome] = None
+        self.driver:   Optional[Driver] = None  # SeleniumBase Driver; webdriver.Chrome subclass
         self.recipe:   Optional[dict]           = None
 
         self._leads_collected:   List[Dict[str, Any]] = []
@@ -82,17 +81,12 @@ class ListingsSiteAgent:
     # DRIVER MANAGEMENT
     # =========================================================================
 
-    def _init_driver(self) -> webdriver.Chrome:
-        opts = Options()
-        opts.add_argument("--headless=new")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--window-size=1920,1080")
-        opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-        service = Service(ChromeDriverManager().install())
-        driver  = webdriver.Chrome(service=service, options=opts)
+    def _init_driver(self) -> Driver:
+        # SeleniumBase Driver(uc=True) handles all anti-detection patching internally.
+        # Do NOT pass ChromeOptions manually — uc mode sets its own flags and adding
+        # conflicting arguments (headless=new, excludeSwitches, AutomationControlled)
+        # causes the GetHandleVerifier C++ crash seen with undetected-chromedriver.
+        driver = Driver(uc=True, headless=True)
         driver.set_page_load_timeout(30)
         return driver
 
@@ -311,9 +305,12 @@ class ListingsSiteAgent:
         except re.error:
             item_regex = EMAIL_REGEX
 
+        # DOM attribute to read from each matched element before regex cleaning
+        target_attribute = self.recipe.get("target_attribute", "text")
+
         self._log("EXTRACTING",
                   f"Tier 1 start | selector='{primary_sel}' | "
-                  f"regex='{regex_pat}' | method={method}")
+                  f"attr='{target_attribute}' | regex='{regex_pat}' | method={method}")
         current_url = self.base_url
 
         while current_url and pages_done < max_pages:
@@ -323,18 +320,34 @@ class ListingsSiteAgent:
                 soup = self._bs4_fetch(current_url)
                 if soup is None:
                     break
-                emails = self._emails_from_soup_with_regex(soup, primary_sel, item_regex)
-                self._absorb_emails(emails, current_url)
-                current_url = self._next_url_from_soup(soup, current_url)
-
             else:  # SELENIUM
                 if self.driver.current_url != current_url:
                     self.driver.get(current_url)
-                self._wait_for_selector(primary_sel)
-                soup   = BeautifulSoup(self.driver.page_source, "html.parser")
-                emails = self._emails_from_soup_with_regex(soup, primary_sel, item_regex)
-                self._absorb_emails(emails, current_url)
+                
+                try:
+                    self._wait_for_selector(primary_sel)
+                except Exception as e:
+                    # Save screenshot for debugging before re-raising so the log
+                    # file always has a visual snapshot of the blocked/timeout state.
+                    self._log("EXTRACTING", f"Timeout waiting for selector. Saving debug screenshot.")
+                    self.driver.save_screenshot("timeout_debug.png")
+                    raise e
+                    
+                soup = BeautifulSoup(self.driver.page_source, "html.parser")
 
+            # DOM-first extraction: select elements then extract via target_attribute
+            extracted: Set[str] = set()
+            for el in soup.select(primary_sel):
+                value = self._dom_extract(el, target_attribute, regex_pat)
+                if value:
+                    extracted.add(value.lower())
+
+            self._absorb_emails(extracted, current_url)
+            self._log("EXTRACTING", f"Tier 1 — found {len(extracted)} values on this page.")
+
+            if method == "BS4":
+                current_url = self._next_url_from_soup(soup, current_url)
+            else:
                 if self._is_last_page():
                     self._log("EXTRACTING", "Tier 1 — last page indicator found, stopping.")
                     break
@@ -363,10 +376,7 @@ class ListingsSiteAgent:
         method         = self.recipe.get("method", "SELENIUM").upper()
         regex_pat      = self.recipe.get("regex_pattern", EMAIL_REGEX.pattern)
 
-        try:
-            item_regex = re.compile(regex_pat)
-        except re.error:
-            item_regex = EMAIL_REGEX
+        target_attribute = self.recipe.get("target_attribute", "text")
 
         self._log("EXTRACTING",
                   f"Tier 2 — Phase A: collecting subpage links | "
@@ -376,7 +386,13 @@ class ListingsSiteAgent:
 
         while pages_done < max_pages:
             self._log("EXTRACTING", f"Tier 2 — main page {pages_done + 1}.")
-            self._wait_for_selector(primary_sel)
+            
+            try:
+                self._wait_for_selector(primary_sel)
+            except Exception as e:
+                self._log("EXTRACTING", f"Timeout waiting for selector. Saving debug screenshot.")
+                self.driver.save_screenshot("timeout_debug.png")
+                raise e
 
             if method == "BS4":
                 soup = BeautifulSoup(self.driver.page_source, "html.parser")
@@ -390,6 +406,8 @@ class ListingsSiteAgent:
                     href = el.get_attribute("href")
                     if not href:
                         try:
+                            from selenium.webdriver.common.by import By
+                            from selenium.common.exceptions import NoSuchElementException
                             child = el.find_element(By.TAG_NAME, "a")
                             href  = child.get_attribute("href")
                         except NoSuchElementException:
@@ -412,9 +430,13 @@ class ListingsSiteAgent:
                   f"Phase A done. {len(all_subpage_urls)} unique subpage URLs. "
                   f"Starting parallel scrape…")
 
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=TIER2_MAX_WORKERS) as pool:
             futures = {
-                pool.submit(self._scrape_subpage, url, subpage_sel, item_regex): url
+                pool.submit(
+                    self._scrape_subpage, url, subpage_sel,
+                    target_attribute, regex_pat      # pass new params
+                ): url
                 for url in all_subpage_urls
             }
             for future in as_completed(futures):
@@ -432,31 +454,41 @@ class ListingsSiteAgent:
 
         self._log("EXTRACTING",
                   f"Tier 2 complete. {len(self._leads_collected)} subpages yielded emails.")
+        
 
     def _scrape_subpage(
         self, url: str, subpage_selector: str,
-        item_regex: re.Pattern = EMAIL_REGEX
+        target_attribute: str = "text",
+        regex_pattern: str = r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
     ) -> Optional[Dict[str, Any]]:
         """
-        Thread worker: fetch a subpage and extract emails using the
-        Groq-validated regex. Falls back to full-page scan if selector
-        matches nothing.
+        Thread worker: fetch a subpage and extract values using DOM parsing.
+        Uses _dom_extract() (BS4 attribute access + regex clean) rather than
+        raw regex scanning across the full page text.
         """
         soup = self._bs4_fetch(url)
         if soup is None:
             return None
 
+        # Narrow to subpage_selector scope if provided; fall back to full page
         scope = None
         if subpage_selector:
             try:
                 scope = soup.select_one(subpage_selector)
             except Exception:
                 scope = None
+        search_root = scope if scope else soup
 
-        emails = self._emails_from_soup_with_regex(
-            scope if scope else soup, None, item_regex
-        )
-        return {"emails": list(emails), "source": url}
+        # Select all candidate elements inside the scoped area and extract
+        found: Set[str] = set()
+        # When no further child selector is available, scan all <a> for mailtos
+        # and all visible text within the scope via the dom_extract helper.
+        for el in search_root.find_all(True):  # True = all tags
+            value = self._dom_extract(el, target_attribute, regex_pattern)
+            if value:
+                found.add(value.lower())
+
+        return {"emails": list(found), "source": url}
 
     # =========================================================================
     # TIER 3  — Company names → Serper → CompanySites
@@ -472,26 +504,29 @@ class ListingsSiteAgent:
         regex_pat   = self.recipe.get("regex_pattern", r"[A-Za-z0-9 &.,()\-]+")
         pages_done  = 0
 
-        try:
-            name_regex = re.compile(regex_pat)
-        except re.error:
-            name_regex = re.compile(r"[A-Za-z0-9 &.,()\-]+")
+        # DOM attribute to read from each matched element before regex cleaning
+        target_attribute = self.recipe.get("target_attribute", "text")
 
         self._log("EXTRACTING",
-                  f"Tier 3 start | selector='{primary_sel}' | regex='{regex_pat}'")
+                  f"Tier 3 start | selector='{primary_sel}' | "
+                  f"attr='{target_attribute}' | regex='{regex_pat}'")
 
         while pages_done < max_pages:
             self._log("EXTRACTING", f"Tier 3 — page {pages_done + 1}.")
-            self._wait_for_selector(primary_sel)
-
+            
+            try:
+                self._wait_for_selector(primary_sel)
+            except Exception as e:
+                self._log("EXTRACTING", f"Timeout waiting for selector. Saving debug screenshot.")
+                self.driver.save_screenshot("timeout_debug.png")
+                raise e
+                
             soup = BeautifulSoup(self.driver.page_source, "html.parser")
             for el in soup.select(primary_sel):
-                raw_name = el.get_text(strip=True)
-                # Apply Groq regex to clean the extracted text
-                match = name_regex.search(raw_name)
-                name  = match.group(0).strip() if match else raw_name.strip()
-                if name and len(name) > 1:
-                    self._company_names_set.add(name)
+                # DOM-first: use target_attribute then clean with regex
+                value = self._dom_extract(el, target_attribute, regex_pat)
+                if value and len(value) > 1:
+                    self._company_names_set.add(value)
 
             if self._is_last_page():
                 self._log("EXTRACTING", "Tier 3 — last page reached, stopping harvest.")
@@ -606,6 +641,41 @@ class ListingsSiteAgent:
     # =========================================================================
     # EMAIL EXTRACTION HELPERS
     # =========================================================================
+
+    def _dom_extract(self, el, target_attribute: str, regex_pattern: str) -> Optional[str]:
+        """
+        BS4 DOM-first extraction — replaces raw regex-on-HTML.
+        Step 1: pull the raw string from the element using target_attribute.
+        Step 2: apply regex_pattern to CLEAN the raw string.
+        Returns the cleaned value or None if nothing matched.
+        """
+        # Step 1 — extract raw string via DOM attribute
+        if target_attribute == "text":
+            raw = el.get_text(separator=" ", strip=True)
+        else:
+            # "href", "content", or any other HTML attribute
+            raw = el.get(target_attribute, "")
+            if raw:
+                raw = raw.strip()
+
+        if not raw:
+            return None
+
+        # Step 2 — apply regex to clean / validate the raw string
+        try:
+            import re
+            match = re.search(regex_pattern, raw)
+        except re.error:
+            # If the pattern is malformed just return the raw value
+            return raw.strip() or None
+
+        if not match:
+            return None
+
+        # Prefer first capture group (e.g. r"mailto:(.*)" → strips "mailto:")
+        # Fall back to the full match when there are no groups
+        clean = match.group(1) if match.groups() else match.group(0)
+        return clean.strip() or None
 
     def _emails_from_soup(self, scope) -> Set[str]:
         """Extract emails from a BeautifulSoup Tag using the default EMAIL_REGEX."""
