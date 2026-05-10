@@ -251,6 +251,10 @@ VALIDATION RULES:
                    JS button  → pagination_href=false, method="SELENIUM".
 7. All required keys must be non-empty strings. Use "" only for optional fields.
 8. Simpler selectors are more robust — prefer tag.class over :nth-child chains.
+CRITICAL: Return regex_pattern as a RAW regex string WITHOUT Python notation.
+WRONG: "regex_pattern": "r\"[A-Za-z]+\""
+CORRECT: "regex_pattern": "[A-Za-z]+"
+
 """
     # ─────────────────────────────────────────────────────────────────────────
     # Post-processing helpers

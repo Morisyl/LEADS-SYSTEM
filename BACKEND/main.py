@@ -117,6 +117,7 @@ class Orchestrator:
         """
         self._ensure_task(task_id)
         self.active_tasks[task_id]["status"] = status
+        print(f"[Orchestrator] Task {task_id[:8]} status updated to: {status}")
         if log:
             ts = time.strftime("%H:%M:%S")
             self.active_tasks[task_id]["logs"].append(f"[{ts}] {log}")
@@ -158,11 +159,11 @@ class Orchestrator:
         task_db = self.db.get_task_status(task_id)
         if task_db and task_id in self.active_tasks:
             self.active_tasks[task_id]["lead_count"] = task_db["lead_count"]
+            self.active_tasks[task_id]["company_count"] = task_db.get("company_count", len(structured_leads))
 
         self.db.update_task_status(task_id, "completed")
         self.update_task_memory(task_id, "COMPLETED",
                                 f"Pipeline finished. {len(structured_leads)} lead records saved.")
-
     # ----------------------------------------------------------
     # Background pipeline: document upload
     # ----------------------------------------------------------

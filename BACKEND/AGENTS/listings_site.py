@@ -516,25 +516,36 @@ class ListingsSiteAgent:
             
             try:
                 self._wait_for_selector(primary_sel)
+                # Add small delay to ensure content is rendered
+                time.sleep(1)
             except Exception as e:
                 self._log("EXTRACTING", f"Timeout waiting for selector. Saving debug screenshot.")
                 self.driver.save_screenshot("timeout_debug.png")
                 raise e
                 
             soup = BeautifulSoup(self.driver.page_source, "html.parser")
-            for el in soup.select(primary_sel):
+            matched_elements = soup.select(primary_sel)
+            self._log("EXTRACTING", f"Found {len(matched_elements)} elements matching '{primary_sel}'")
+
+            for el in matched_elements:
                 # DOM-first: use target_attribute then clean with regex
                 value = self._dom_extract(el, target_attribute, regex_pat)
+                self._log("EXTRACTING", f"Extracted value: '{value}' from element")
                 if value and len(value) > 1:
                     self._company_names_set.add(value)
+                    self._log("EXTRACTING", f"Added company: '{value}'")
+
+            # Log current extraction progress before pagination
+            self._log("EXTRACTING", f"Page {pages_done + 1} complete. Collected {len(self._company_names_set)} companies so far.")
 
             if self._is_last_page():
                 self._log("EXTRACTING", "Tier 3 — last page reached, stopping harvest.")
                 break
+
             next_url = self._selenium_next_page()
             if next_url is None:
+                self._log("EXTRACTING", f"No next page found. Ending at page {pages_done + 1}.")
                 break
-            pages_done += 1
 
         self._log("EXTRACTING",
                   f"Harvested {len(self._company_names_set)} company names. "
@@ -559,7 +570,8 @@ class ListingsSiteAgent:
             lead_stubs,
             self.core.active_tasks[self.task_id]["industry"],
         )
-        self._log("EXTRACTING", "Tier 3 complete. CompanySites agent handed off.")
+        # DO NOT call _log here - CompanySites → output_server already set status to COMPLETED
+        # Any _log call here would overwrite it back to EXTRACTING
         self._leads_collected = []   # CompanySites calls output_server directly
 
     # =========================================================================
@@ -649,6 +661,12 @@ class ListingsSiteAgent:
         Step 2: apply regex_pattern to CLEAN the raw string.
         Returns the cleaned value or None if nothing matched.
         """
+        # Sanitize regex pattern if Groq returned it as a string literal
+        if regex_pattern.startswith('r"') or regex_pattern.startswith("r'"):
+            regex_pattern = regex_pattern[2:]  # Remove r" or r'
+        if regex_pattern.endswith('"') or regex_pattern.endswith("'"):
+            regex_pattern = regex_pattern[:-1]  # Remove trailing quote
+        regex_pattern = regex_pattern.replace('\\"', '"').replace("\\'", "'")
         # Step 1 — extract raw string via DOM attribute
         if target_attribute == "text":
             raw = el.get_text(separator=" ", strip=True)
@@ -659,6 +677,9 @@ class ListingsSiteAgent:
                 raw = raw.strip()
 
         if not raw:
+            # Log empty extraction for debugging
+            if self.task_id:
+                print(f"[DEBUG] _dom_extract: empty raw value for attribute '{target_attribute}'")
             return None
 
         # Step 2 — apply regex to clean / validate the raw string
@@ -667,9 +688,13 @@ class ListingsSiteAgent:
             match = re.search(regex_pattern, raw)
         except re.error:
             # If the pattern is malformed just return the raw value
+            if self.task_id:
+                print(f"[DEBUG] _dom_extract: regex error, returning raw: '{raw[:50]}'")
             return raw.strip() or None
 
         if not match:
+            if self.task_id:
+                print(f"[DEBUG] _dom_extract: no regex match in raw: '{raw[:50]}'")
             return None
 
         # Prefer first capture group (e.g. r"mailto:(.*)" → strips "mailto:")
@@ -785,7 +810,14 @@ class ListingsSiteAgent:
         """
         print(f"[ListingsAgent | {self.task_id}] [{status}] {message}")
         if self.task_id:
-            self.core.update_task_memory(self.task_id, status, message)
+            # Don't downgrade COMPLETED status back to EXTRACTING
+            current_status = self.core.active_tasks.get(self.task_id, {}).get("status", "")
+            if current_status == "COMPLETED" and status == "EXTRACTING":
+                # Just add the log without changing status
+                ts = time.strftime("%H:%M:%S")
+                self.core.active_tasks[self.task_id]["logs"].append(f"[{ts}] {message}")
+            else:
+                self.core.update_task_memory(self.task_id, status, message)
 
     def _domain_as_company(self, url: str) -> str:
         try:

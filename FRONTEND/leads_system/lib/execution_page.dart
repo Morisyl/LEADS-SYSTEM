@@ -143,6 +143,8 @@ class _ExecutionPageState extends State<ExecutionPage> {
         // Navigate away when the task finishes
         if (newStatus == 'COMPLETED') {
           _stopPolling();
+          // Small delay to ensure final DB writes complete
+          await Future.delayed(const Duration(milliseconds: 500));
           _navigateToResults();
         }
       }
