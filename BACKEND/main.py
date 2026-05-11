@@ -502,23 +502,40 @@ def get_job_status(task_id: str):
 @app.get("/savefile", dependencies=[Depends(verify_token)])
 def download_results(
     task_id: str = Query(...),
-    format: str = Query(..., pattern="^(csv|pdf)$"),
+    format: str = Query(..., pattern="^(csv|pdf|txt)$"),
 ):
     """Generates and streams the leads export for a completed task."""
+    try:
+        leads = core.db.get_leads_for_task(task_id)
+        if not leads:
+            raise HTTPException(
+                status_code=400,
+                detail="No leads found for this task, or the task is still processing."
+            )
+
+        file_path = core.output_agent.generate_file(leads, format)
+        return FileResponse(
+            path=file_path,
+            filename=os.path.basename(file_path),
+            media_type="application/octet-stream",
+        )
+    except ValueError as e:
+        # Unsupported format or other value errors
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        # Log the full error for debugging
+        print(f"[Export Error] {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+@app.get("/tasks/{task_id}/leads", dependencies=[Depends(verify_token)])
+def get_task_leads(task_id: str):
+    """Returns the leads for a task as JSON for preview in ResultsPage."""
     leads = core.db.get_leads_for_task(task_id)
     if not leads:
-        raise HTTPException(
-            status_code=400,
-            detail="No leads found for this task, or the task is still processing."
-        )
-
-    file_path = core.output_agent.generate_file(leads, format)
-    return FileResponse(
-        path=file_path,
-        filename=os.path.basename(file_path),
-        media_type="application/octet-stream",
-    )
-
+        return []
+    return leads
 
 # ----------------------------------------------------------
 # 10.  Shutdown hook

@@ -12,3 +12,7 @@ FRONTEND/leads_system/build/
 
 # Flutter tool cache (generated)
 FRONTEND/leads_system/.dart_tool/
+
+# env file
+C:/LEADS SYSTEM APP/BACKEND/.env
+

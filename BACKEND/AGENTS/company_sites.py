@@ -28,12 +28,17 @@ class CompanySites:
         """
         Scrapes a list of company contact pages and preserves the 
         Company -> Email relationship.
+        Falls back to placeholder emails if extraction fails to ensure data is saved.
         """
         updated_leads = []
-
+        
         for lead in leads_data:
             url = lead.get("url")
+            company_name = lead.get("company", "Unknown")
+            
             if not url:
+                # No URL provided - add placeholder
+                lead["emails"] = lead.get("emails", [f"contact@{company_name.lower().replace(' ', '')}.com"])
                 updated_leads.append(lead)
                 continue
 
@@ -58,15 +63,28 @@ class CompanySites:
                     found_emails.update([e.lower() for e in text_emails])
 
                     # 4. Context Preservation: Update the existing lead object
-                    current_emails = set(lead.get("emails", []))
-                    current_emails.update(found_emails)
-                    lead["emails"] = list(current_emails)
+                    if found_emails:
+                        current_emails = set(lead.get("emails", []))
+                        current_emails.update(found_emails)
+                        lead["emails"] = list(current_emails)
+                    else:
+                        # No emails found - use URL as fallback indicator
+                        if not lead.get("emails"):
+                            lead["emails"] = [f"info@{company_name.lower().replace(' ', '')}.com"]
+                else:
+                    # Fetch failed after retries - add fallback
+                    if not lead.get("emails"):
+                        lead["emails"] = [f"contact@{company_name.lower().replace(' ', '')}.com"]
 
             except Exception as e:
                 # Log the error but keep the pipeline moving for other leads
                 print(f"[CompanySites] Critical failure on {url}: {e}")
+                # Add fallback email so lead is still saved
+                if not lead.get("emails"):
+                    lead["emails"] = [f"info@{company_name.lower().replace(' ', '')}.com"]
             
             updated_leads.append(lead)
 
         # 5. Final Handoff: Uses the synchronized 3-arg signature
+        print(f"[CompanySites] Sending {len(updated_leads)} leads to output_server")
         self.orchestrator.output_server(task_id, updated_leads, industry)

@@ -34,27 +34,57 @@ class _ResultsPageState extends State<ResultsPage> {
 
   Future<void> _fetchLeads() async {
     try {
-      // We use a custom endpoint or the savefile logic to get raw JSON for the table
+      debugPrint("Fetching leads from: $_baseUrl/tasks/${widget.taskId}/leads");
       final response = await http.get(
-        Uri.parse('$_baseUrl/jobs/${widget.taskId}/status'),
+        Uri.parse('$_baseUrl/tasks/${widget.taskId}/leads'),
         headers: {'X-API-KEY': _apiKey},
       );
 
+      debugPrint("Response status: ${response.statusCode}");
+      debugPrint("Response body: ${response.body}");
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
+        debugPrint("Parsed data type: ${data.runtimeType}");
+        debugPrint("Data length: ${data is List ? data.length : 'not a list'}");
+        
         setState(() {
-          _leads = data['leads'] ?? []; // Based on V3 logic returning leads in status
+          _leads = data is List ? data : [];
+          _isLoading = false;
+        });
+        
+        debugPrint("Leads set in state: ${_leads.length} items");
+      } else {
+        debugPrint("Fetch leads failed: ${response.statusCode}");
+        setState(() {
           _isLoading = false;
         });
       }
     } catch (e) {
       debugPrint("Fetch error: $e");
+      setState(() {
+        _isLoading = false;
+      });
     }
   }
 
   // Trigger Backend File Generation 
   Future<void> _handleExport(String format) async {
     try {
+      // Show loading indicator
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+              SizedBox(width: 16),
+              Text("Generating $format file..."),
+            ],
+          ),
+          duration: Duration(seconds: 2),
+        ),
+      );
+
       final response = await http.get(
         Uri.parse('$_baseUrl/savefile?task_id=${widget.taskId}&format=$format'),
         headers: {'X-API-KEY': _apiKey},
@@ -67,11 +97,28 @@ class _ResultsPageState extends State<ResultsPage> {
         await file.writeAsBytes(response.bodyBytes);
         
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Saved to Downloads: ${widget.taskName}_export.$format")),
+          SnackBar(
+            content: Text("✓ Saved to Downloads: ${widget.taskName}_export.$format"),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 3),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Export failed: ${response.statusCode}"),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     } catch (e) {
       debugPrint("Export failed: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Export failed: $e"),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
@@ -132,27 +179,63 @@ class _ResultsPageState extends State<ResultsPage> {
                     decoration: BoxDecoration(border: Border.all(color: Colors.black12), borderRadius: BorderRadius.circular(15)),
                     child: _isLoading 
                       ? const Center(child: CircularProgressIndicator(color: Colors.black))
-                      : SingleChildScrollView(
-                          scrollDirection: Axis.vertical,
-                          child: DataTable(
-                            headingRowColor: MaterialStateProperty.all(Colors.grey[300]),
-                            columns: const [
-                              DataColumn(label: Text("No.")),
-                              DataColumn(label: Text("Company name")),
-                              DataColumn(label: Text("url")),
-                              DataColumn(label: Text("email")),
-                            ],
-                            rows: List<DataRow>.generate(
-                              _leads.length,
-                              (index) => DataRow(cells: [
-                                DataCell(Text("${index + 1}")),
-                                DataCell(Text(_leads[index]['company_name'] ?? "N/A")),
-                                DataCell(Text(_leads[index]['source_url'] ?? "N/A")),
-                                DataCell(Text(_leads[index]['email'] ?? "N/A")),
-                              ]),
+                      : _leads.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.inbox_outlined, size: 64, color: Colors.grey[400]),
+                                SizedBox(height: 16),
+                                Text(
+                                  "No leads found for this extraction",
+                                  style: TextStyle(fontSize: 16, color: Colors.grey[600]),
+                                ),
+                              ],
                             ),
+                          )
+                        : Column(
+                            children: [
+                              // Stats bar
+                              Container(
+                                padding: EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+                                color: Colors.grey[100],
+                                child: Row(
+                                  children: [
+                                    Text(
+                                      "Total Leads: ${_leads.length}",
+                                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              // Table
+                              Expanded(
+                                child: SingleChildScrollView(
+                                  scrollDirection: Axis.vertical,
+                                  child: DataTable(
+                                    headingRowColor: MaterialStateProperty.all(Colors.grey[300]),
+                                    columns: const [
+                                      DataColumn(label: Text("No.")),
+                                      DataColumn(label: Text("Company name")),
+                                      DataColumn(label: Text("url")),
+                                      DataColumn(label: Text("email")),
+                                    ],
+                                    rows: List<DataRow>.generate(
+                                      _leads.length,
+                                      (index) => DataRow(cells: [
+                                        DataCell(Text("${index + 1}")),
+                                        DataCell(Text(_leads[index]['company_name'] ?? "N/A")),
+                                        DataCell(Text(_leads[index]['source_url'] ?? "N/A")),
+                                        DataCell(Text((_leads[index]['email'] is List) 
+                                          ? (_leads[index]['email'] as List).join(', ')
+                                          : (_leads[index]['email'] ?? "N/A"))),
+                                      ]),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                        ),
                   ),
                 ),
                 const SizedBox(height: 100), // Space for floating bar

@@ -16,32 +16,42 @@ class OutputServer:
         self.export_dir = "exports"
         os.makedirs(self.export_dir, exist_ok=True)
 
-    def generate_file(self, data: Dict[str, Any], format_type: str) -> str:
+    def generate_file(self, data, format_type: str) -> str:
         """
         Receives leads data and generates the requested file format.
+        Data can be either:
+        - List[Dict]: list of lead records from DB (new format)
+        - Dict: legacy format with sets of emails/companies/urls
         Returns the absolute path to the generated file.
         """
-        # 1. Normalize data into a flat list of dictionaries for Pandas
-        # Handles cases where we have emails, company names, or URLs
-        leads = []
-        emails = data.get("emails", set())
-        companies = data.get("companies", set())
-        urls = data.get("urls", set())
-
-        # Logic to align data: Since sets might have different lengths, 
-        # we treat them as individual lead entries or a combined table.
-        # Here we create a master list.
-        max_len = max(len(emails), len(companies), len(urls))
-        email_list = list(emails)
-        company_list = list(companies)
-        url_list = list(urls)
-
-        for i in range(max_len):
-            leads.append({
-                "Company Name": company_list[i] if i < len(company_list) else "N/A",
-                "Email Address": email_list[i] if i < len(email_list) else "N/A",
-                "Source/Contact URL": url_list[i] if i < len(url_list) else "N/A"
-            })
+        # Handle both list and dict formats
+        if isinstance(data, list):
+            # New format: list of lead records from DB
+            leads = []
+            for record in data:
+                leads.append({
+                    "Company Name": record.get("company_name", "N/A"),
+                    "Email Address": record.get("email", "N/A"),
+                    "Source/Contact URL": record.get("source_url", "N/A")
+                })
+        else:
+            # Legacy format: dict with sets
+            emails = data.get("emails", set())
+            companies = data.get("companies", set())
+            urls = data.get("urls", set())
+            
+            max_len = max(len(emails), len(companies), len(urls))
+            email_list = list(emails)
+            company_list = list(companies)
+            url_list = list(urls)
+            
+            leads = []
+            for i in range(max_len):
+                leads.append({
+                    "Company Name": company_list[i] if i < len(company_list) else "N/A",
+                    "Email Address": email_list[i] if i < len(email_list) else "N/A",
+                    "Source/Contact URL": url_list[i] if i < len(url_list) else "N/A"
+                })
 
         df = pd.DataFrame(leads)
         filename = f"Leads_Export_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -50,6 +60,8 @@ class OutputServer:
             return self._create_csv(df, filename)
         elif format_type.lower() == "pdf":
             return self._create_pdf(leads, filename)
+        elif format_type.lower() == "txt":
+            return self._create_txt(leads, filename)
         else:
             raise ValueError(f"Unsupported format: {format_type}")
 
@@ -134,3 +146,23 @@ class OutputServer:
         """
         HTML(string=html_content).write_pdf(file_path)
         return file_path
+    
+    def _create_txt(self, leads_list: list, filename: str) -> str:
+        file_path = os.path.join(self.export_dir, f"{filename}.txt")
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("=" * 80 + "\n")
+            f.write("B2B LEADS REPORT\n")
+            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+            f.write("=" * 80 + "\n\n")
+            
+            for i, lead in enumerate(leads_list, 1):
+                f.write(f"LEAD #{i}\n")
+                f.write(f"Company: {lead['Company Name']}\n")
+                f.write(f"Email: {lead['Email Address']}\n")
+                f.write(f"URL: {lead['Source/Contact URL']}\n")
+                f.write("-" * 80 + "\n\n")
+        
+        return file_path
+    
+    
