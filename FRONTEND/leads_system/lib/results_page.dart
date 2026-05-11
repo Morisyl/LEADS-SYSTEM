@@ -71,7 +71,6 @@ class _ResultsPageState extends State<ResultsPage> {
   // Trigger Backend File Generation 
   Future<void> _handleExport(String format) async {
     try {
-      // Show loading indicator
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Row(
@@ -92,13 +91,19 @@ class _ResultsPageState extends State<ResultsPage> {
 
       if (response.statusCode == 200) {
         final directory = await getDownloadsDirectory();
-        final filePath = '${directory!.path}/${widget.taskName}_export.$format';
+        
+        // Use timestamp and short task ID for clean filename
+        final timestamp = DateTime.now().toIso8601String().substring(0, 19).replaceAll(':', '-');
+        final shortId = widget.taskId.substring(0, 8);
+        final filename = 'leads_export_${timestamp}_$shortId.$format';
+        
+        final filePath = '${directory!.path}/$filename';
         final file = File(filePath);
         await file.writeAsBytes(response.bodyBytes);
         
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("✓ Saved to Downloads: ${widget.taskName}_export.$format"),
+            content: Text("✓ Saved: $filename"),
             backgroundColor: Colors.green,
             duration: Duration(seconds: 3),
           ),
@@ -115,7 +120,7 @@ class _ResultsPageState extends State<ResultsPage> {
       debugPrint("Export failed: $e");
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text("Export failed: $e"),
+          content: Text("Export error. Check console."),
           backgroundColor: Colors.red,
         ),
       );
