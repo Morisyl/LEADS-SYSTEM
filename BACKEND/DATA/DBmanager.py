@@ -19,17 +19,40 @@ class DBManager:
     def _init_db(self):
         """Initializes the schema with Job Tracking, Recipes, and Leads."""
         with self._get_connection() as conn:
-            # 1. Tasks/Jobs Table (Replaces global session_results)
+            # 1. Tasks/Jobs Table
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY,
-                    status TEXT DEFAULT 'pending', -- pending, running, completed, failed
+                    status TEXT DEFAULT 'pending',
                     industry TEXT,
                     lead_count INTEGER DEFAULT 0,
+                    company_count INTEGER DEFAULT 0,
+                    current_tier INTEGER DEFAULT 1,
+                    progress_state TEXT,
                     created_at TIMESTAMP,
                     updated_at TIMESTAMP
                 )
             ''')
+            
+            # MIGRATION: Add new columns if they don't exist
+            try:
+                conn.execute("SELECT current_tier FROM tasks LIMIT 1")
+            except sqlite3.OperationalError:
+                # Column doesn't exist, add it
+                conn.execute("ALTER TABLE tasks ADD COLUMN current_tier INTEGER DEFAULT 1")
+                print("[DB Migration] Added current_tier column to tasks table")
+            
+            try:
+                conn.execute("SELECT progress_state FROM tasks LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute("ALTER TABLE tasks ADD COLUMN progress_state TEXT")
+                print("[DB Migration] Added progress_state column to tasks table")
+            
+            try:
+                conn.execute("SELECT company_count FROM tasks LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute("ALTER TABLE tasks ADD COLUMN company_count INTEGER DEFAULT 0")
+                print("[DB Migration] Added company_count column to tasks table")
 
             # 2. Recipes Table (For the Listing Sites Agent)
             conn.execute('''
@@ -146,3 +169,31 @@ class DBManager:
         with self._get_connection() as conn:
             rows = conn.execute("SELECT * FROM leads_library WHERE task_id = ?", (task_id,)).fetchall()
             return [dict(r) for r in rows]
+    
+    def update_task_progress(self, task_id: str, tier: int, progress_state: dict):
+        """Updates task progress for recovery."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                UPDATE tasks 
+                SET current_tier = ?, 
+                    progress_state = ?, 
+                    updated_at = ?
+                WHERE task_id = ?
+            """, (tier, json.dumps(progress_state), datetime.now(), task_id))
+            conn.commit()
+
+
+    def get_task_progress(self, task_id: str) -> Optional[dict]:
+        """Retrieves task progress for recovery."""
+        with self._get_connection() as conn:
+            row = conn.execute("""
+                SELECT current_tier, progress_state 
+                FROM tasks 
+                WHERE task_id = ?
+            """, (task_id,)).fetchone()
+            if row:
+                return {
+                    "tier": row["current_tier"],
+                    "state": json.loads(row["progress_state"]) if row["progress_state"] else {}
+                }
+            return None    

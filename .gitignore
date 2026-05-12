@@ -1,6 +1,9 @@
 # Miscellaneous temp folder
 New folder/
 
+# Miscellaneous temp folder
+FFFFF/
+
 # Python virtual environment
 BACKEND/venv/
 
@@ -14,5 +17,5 @@ FRONTEND/leads_system/build/
 FRONTEND/leads_system/.dart_tool/
 
 # env file
-C:/LEADS SYSTEM APP/BACKEND/.env
+BACKEND/.env
 

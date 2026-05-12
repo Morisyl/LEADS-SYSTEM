@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import 'visual_trainer.dart';
 import 'results_page.dart';
+// import 'common/custom_app_bar.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data model for a captured element selector
@@ -72,6 +73,8 @@ class _ExecutionPageState extends State<ExecutionPage> {
   // ── Start-button guard ───────────────────────────────────────────────────────
   bool _startInProgress = false;
 
+  bool _recipeCheckShown = false;  // ADD THIS
+
   // ─────────────────────────────────────────────────────────────────────────
   // Lifecycle
   // ─────────────────────────────────────────────────────────────────────────
@@ -136,8 +139,13 @@ class _ExecutionPageState extends State<ExecutionPage> {
 
         // When the backend signals training is needed, open VisualTrainerPage
         // once. The guard prevents re-pushing while the page is already open.
-        if (newStatus == 'AWAITING_TRAINING' && !_trainingOpen) {
-          _openTrainingFlow();
+        if (newStatus == 'AWAITING_TRAINING' && !_recipeCheckShown) {
+          _recipeCheckShown = true;  // Prevent repeated calls
+          await _checkExistingRecipe(_toInspectorUrl(widget.promptOrUrl));
+          // After recipe check, if still AWAITING_TRAINING, open training flow
+          if (mounted && _status == 'AWAITING_TRAINING' && !_trainingOpen) {
+            _openTrainingFlow();
+          }
         }
 
         // Navigate away when the task finishes
@@ -175,6 +183,9 @@ class _ExecutionPageState extends State<ExecutionPage> {
 
   /// Opens the training wizard overlay and stops the live-frame timer so the
   /// static snapshot behind the wizard doesn't flicker.
+  
+  
+  
   void _openTrainingFlow() {
     setState(() {
       _trainingOpen = true;
@@ -198,6 +209,10 @@ class _ExecutionPageState extends State<ExecutionPage> {
     });
     _addLog('User: Tier $tier selected. Ready to capture primary selector.');
   }
+
+
+  
+
 
   /// Opens VisualTrainerPage to capture ONE selector.
   /// [label] is shown in the snackbar / UI ("Lead container", "Next button").
@@ -479,6 +494,8 @@ class _ExecutionPageState extends State<ExecutionPage> {
     }
   }
 
+  
+
   // ─────────────────────────────────────────────────────────────────────────
   // Extraction start
   // ─────────────────────────────────────────────────────────────────────────
@@ -567,6 +584,262 @@ class _ExecutionPageState extends State<ExecutionPage> {
     );
   }
 
+
+  Future<void> _checkExistingRecipe(String url) async {
+    final uri    = Uri.tryParse(url);
+    final domain = uri != null ? uri.host.replaceAll('www.', '') : url;
+
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$_baseUrl/recipes/check/$domain'),
+            headers: {'X-API-KEY': _apiKey},
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+        if (data['exists'] == true) {
+          final useExisting = await showDialog<bool>(
+            context: context,
+            barrierDismissible: false,  // ADD THIS - prevents clicking outside to dismiss
+            builder: (ctx) => AlertDialog(
+              title: const Text('Existing Recipe Found'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('A trained recipe already exists for this domain:'),
+                  const SizedBox(height: 12),
+                  Text('Domain : ${data['domain']}',
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  Text('Tier   : ${data['tier']}'),
+                  if (data['created_at'] != null)
+                    Text('Created: ${data['created_at']}'),
+                  const SizedBox(height: 16),
+                  const Text('Use it, or train a fresh recipe?'),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Train New'),
+                ),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF6BCF47)),
+                  child: const Text('Use Existing'),
+                ),
+              ],
+            ),
+          );
+
+          if (useExisting == true) {
+            // Fetch and use existing recipe
+            debugPrint('[Recipe] Fetching recipe for domain: $domain');
+            
+            final recipeResponse = await http.get(
+              Uri.parse('$_baseUrl/recipes/$domain'),
+              headers: {'X-API-KEY': _apiKey},
+            );
+            
+            debugPrint('[Recipe] Response status: ${recipeResponse.statusCode}');
+            debugPrint('[Recipe] Response body: ${recipeResponse.body}');
+            
+            if (recipeResponse.statusCode == 200) {
+              final recipe = jsonDecode(recipeResponse.body);
+              debugPrint('[Recipe] Loaded recipe: $recipe');
+              _startWithRecipe(url, recipe);
+              return;
+            } else {
+              debugPrint('[Recipe] Failed to fetch recipe');
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Failed to load existing recipe. Please train a new one.'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+              _openVisualTrainer(url);
+            }
+          }
+          // else fall through — wizard opens normally via _openTrainingFlow
+        }
+      }
+    } on Exception catch (e) {
+      debugPrint('Recipe check error: $e');
+      // On any failure, fall through to normal wizard flow
+    }
+  }
+
+
+  void _openVisualTrainer(String url) {
+    // Extract domain from URL
+    final domain = Uri.parse(url).host.replaceAll('www.', '');
+    
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => VisualTrainerPage(
+          taskId: widget.taskId,
+          domain: domain,
+        ),
+      ),
+    );
+  }
+
+Future<void> _startWithRecipe(String url, Map<String, dynamic> recipe) async {
+  debugPrint('[Recipe] Starting extraction with existing recipe');
+  
+  try {
+    final response = await http.post(
+      Uri.parse('$_baseUrl/tasks/${widget.taskId}/start'),
+      headers: {
+        'X-API-KEY': _apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'url': url,
+        'recipe': recipe,
+        'industry': 'General',  // or pass from widget if available
+      }),
+    );
+    
+    if (response.statusCode == 200) {
+      debugPrint('[Recipe] Extraction started successfully');
+      // The existing polling will pick up the status change
+    } else {
+      debugPrint('[Recipe] Start failed: ${response.statusCode}');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to start extraction: ${response.statusCode}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  } catch (e) {
+    debugPrint('[Recipe] Start error: $e');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Error starting extraction: $e'),
+        backgroundColor: Colors.red,
+      ),
+    );
+  }
+}
+
+
+  Future<void> _pauseTask() async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/tasks/${widget.taskId}/pause'),
+        headers: {'X-API-KEY': _apiKey},
+      );
+      
+      if (response.statusCode == 200) {
+        setState(() {
+          _status = 'paused';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Task paused'),
+            backgroundColor: Colors.orange,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Pause failed: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to pause: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _resumeTask() async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/tasks/${widget.taskId}/resume'),
+        headers: {'X-API-KEY': _apiKey},
+      );
+      
+      if (response.statusCode == 200) {
+        setState(() {
+          _status = 'EXTRACTING';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Task resumed'),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Resume failed: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to resume: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _cancelTask() async {
+    // Show confirmation dialog
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel Extraction?'),
+        content: const Text(
+          'This will stop the extraction immediately. This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('No, Continue'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Yes, Cancel'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      try {
+        await http.post(
+          Uri.parse('$_baseUrl/tasks/${widget.taskId}/cancel'),
+          headers: {'X-API-KEY': _apiKey},
+        );
+        
+        _stopPolling();
+        
+        if (mounted) {
+          Navigator.pop(context); // Return to home page
+        }
+      } catch (e) {
+        debugPrint('Cancel failed: $e');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to cancel: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+
   // ─────────────────────────────────────────────────────────────────────────
   // Helpers
   // ─────────────────────────────────────────────────────────────────────────
@@ -608,6 +881,7 @@ class _ExecutionPageState extends State<ExecutionPage> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Row(
+        
         children: [
           // ── LEFT: live preview + training wizard ───────────────────────────
           Expanded(
@@ -641,6 +915,22 @@ class _ExecutionPageState extends State<ExecutionPage> {
                   // Training wizard overlay — only while AWAITING_TRAINING
                   if (_trainingOpen) _buildTrainingWizard(),
 
+                  // Home button — top-right of the live preview panel
+                  Positioned(
+                    top: 20,
+                    right: 20,
+                    child: GestureDetector(
+                      onTap: () => Navigator.of(context).popUntil((route) => route.isFirst),
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(Icons.home, color: Colors.white, size: 22),
+                      ),
+                    ),
+                  ),
                   // Top label
                   Positioned(
                     top: 20,
@@ -673,6 +963,13 @@ class _ExecutionPageState extends State<ExecutionPage> {
                 children: [
                   _buildStatusCard(),
                   const SizedBox(height: 20),
+                  
+                  // Control buttons for pause/resume/cancel
+                  if (_status != 'COMPLETED' && _status != 'FAILED')
+                    _buildControlButtons(),
+                  if (_status != 'COMPLETED' && _status != 'FAILED')
+                    const SizedBox(height: 20),
+                  
                   _buildLogConsole(),
                   const SizedBox(height: 20),
                   _buildStartButton(),
@@ -729,6 +1026,76 @@ class _ExecutionPageState extends State<ExecutionPage> {
     );
   }
 
+  Widget _buildControlButtons() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 25, vertical: 15),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          // Pause button (only show when extracting)
+          if (_status == 'EXTRACTING' || _status == 'SEARCHING')
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _pauseTask,
+                icon: const Icon(Icons.pause, size: 18),
+                label: const Text('Pause'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orange,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+              ),
+            ),
+          
+          // Resume button (only show when paused)
+          if (_status == 'paused')
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _resumeTask,
+                icon: const Icon(Icons.play_arrow, size: 18),
+                label: const Text('Resume'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+              ),
+            ),
+          
+          if (_status == 'EXTRACTING' || _status == 'SEARCHING' || _status == 'paused')
+            const SizedBox(width: 10),
+          
+          // Cancel button (always show when task is running)
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: _cancelTask,
+              icon: const Icon(Icons.cancel, size: 18),
+              label: const Text('Cancel'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _statTile(String label, String value, Color color) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -752,6 +1119,8 @@ class _ExecutionPageState extends State<ExecutionPage> {
       ],
     );
   }
+
+  
 
   /// Scrollable log console.
   Widget _buildLogConsole() {
@@ -1246,6 +1615,8 @@ class _ExecutionPageState extends State<ExecutionPage> {
           ),
         ],
       ),
+
+      
     );
   }
 

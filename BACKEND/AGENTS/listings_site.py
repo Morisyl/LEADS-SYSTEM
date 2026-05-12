@@ -538,6 +538,15 @@ class ListingsSiteAgent:
             # Log current extraction progress before pagination
             self._log("EXTRACTING", f"Page {pages_done + 1} complete. Collected {len(self._company_names_set)} companies so far.")
 
+            # Save progress checkpoint
+            pages_done += 1
+            progress_state = {
+                "page": pages_done,
+                "companies_collected": len(self._company_names_set),
+                "last_url": self.driver.current_url
+            }
+            self.core.db.update_task_progress(self.task_id, 3, progress_state)
+
             if self._is_last_page():
                 self._log("EXTRACTING", "Tier 3 — last page reached, stopping harvest.")
                 break

@@ -227,16 +227,34 @@ class Orchestrator:
     def run_trained_extraction(self, task_id: str, url: str, recipe: dict, industry: str):
         """
         Runs AFTER the Flutter UI has saved a recipe.
-        Called in a background thread so the endpoint returns immediately.
+        Supports resuming from saved progress.
         """
         try:
-            self.update_task_memory(task_id, "EXTRACTING",
-                                    f"Tier {recipe.get('tier', 1)} engine starting.")
-            self.listings_agent.start_system_sync(task_id, url, json.dumps(recipe))
+            # Check for existing progress
+            progress = self.db.get_task_progress(task_id)
+            
+            if task_id not in self.active_tasks:
+                self._ensure_task(task_id)
+                
+            if progress and progress["state"]:
+                # Resume from checkpoint
+                self.update_task_memory(task_id, "EXTRACTING",
+                                        f"Resuming from page {progress['state'].get('page', 1)}")
+                self.listings_agent.start_system_sync(
+                    task_id, url, json.dumps(recipe), resume_state=progress["state"]
+                )
+            else:
+                # Fresh start
+                self.update_task_memory(task_id, "EXTRACTING",
+                                        f"Tier {recipe.get('tier', 1)} engine starting.")
+                self.listings_agent.start_system_sync(task_id, url, json.dumps(recipe))
+                
         except Exception as e:
-            self.db.update_task_status(task_id, "failed")
-            self.update_task_memory(task_id, "FAILED", f"Extraction error: {e}")
-
+            # Catch the exception so the program doesn't crash, 
+            # and ideally log it or update the task state.
+            error_msg = f"Extraction failed: {str(e)}"
+            print(error_msg)
+            self.update_task_memory(task_id, "ERROR", error_msg)
 
 # Single shared instance
 core = Orchestrator()
@@ -471,13 +489,27 @@ def create_recipe(recipe: Recipe):
 
 @app.get("/recipes/{domain}", dependencies=[Depends(verify_token)])
 def get_recipe(domain: str):
-    """Returns the stored recipe for a domain, or 404 if none exists."""
+    """Fetches the stored extraction recipe for a domain."""
     recipe = core.db.query_recipe(domain)
-    if not recipe:
-        raise HTTPException(status_code=404,
-                            detail=f"No recipe found for domain: {domain}")
-    return recipe
+    if recipe:
+        print(f"[Recipe API] Returning recipe for {domain}: {recipe}")
+        return recipe
+    print(f"[Recipe API] No recipe found for domain: {domain}")
+    raise HTTPException(status_code=404, detail="No recipe found for this domain")
 
+
+@app.get("/recipes/check/{domain}", dependencies=[Depends(verify_token)])
+def check_recipe_exists(domain: str):
+    """Checks if a recipe exists for a domain without returning the full recipe."""
+    recipe = core.db.query_recipe(domain)
+    if recipe:
+        return {
+            "exists": True,
+            "domain": domain,
+            "created_at": recipe.get("created_at"),
+            "tier": recipe.get("tier", 1)
+        }
+    return {"exists": False, "domain": domain}
 
 # ----------------------------------------------------------
 # 8.  Job status  (used by PastTasksPage / history view)
@@ -550,7 +582,34 @@ def shutdown_event():
         except Exception:
             pass
 
+@app.post("/tasks/{task_id}/cancel", dependencies=[Depends(verify_token)])
+def cancel_task(task_id: str):
+    """Cancels a running task."""
+    if task_id in core.active_tasks:
+        core.active_tasks[task_id]["status"] = "cancelled"
+        core.db.update_task_status(task_id, "cancelled")
+        return {"status": "cancelled", "task_id": task_id}
+    raise HTTPException(status_code=404, detail="Task not found or already completed")
 
+
+@app.post("/tasks/{task_id}/pause", dependencies=[Depends(verify_token)])
+def pause_task(task_id: str):
+    """Pauses a running task."""
+    if task_id in core.active_tasks:
+        core.active_tasks[task_id]["status"] = "paused"
+        core.db.update_task_status(task_id, "paused")
+        return {"status": "paused", "task_id": task_id}
+    raise HTTPException(status_code=404, detail="Task not found")
+
+
+@app.post("/tasks/{task_id}/resume", dependencies=[Depends(verify_token)])
+def resume_task(task_id: str):
+    """Resumes a paused task."""
+    if task_id in core.active_tasks:
+        core.active_tasks[task_id]["status"] = "EXTRACTING"
+        core.db.update_task_status(task_id, "running")
+        return {"status": "resumed", "task_id": task_id}
+    raise HTTPException(status_code=404, detail="Task not found")
 # ============================================================
 # ENTRY POINT
 # ============================================================
