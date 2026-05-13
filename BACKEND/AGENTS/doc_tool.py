@@ -4,6 +4,8 @@ import numpy as np
 from pdf2image import convert_from_path
 from typing import Dict
 
+
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 class DocTool:
     def __init__(self):
         # Configuration for Tesseract if needed

@@ -168,6 +168,18 @@ class _ResultsPageState extends State<ResultsPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.black),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        title: Text(
+          widget.taskName,
+          style: const TextStyle(color: Colors.black, fontSize: 18),
+        ),
+      ),
       body: Stack(
         children: [
           Padding(
@@ -175,9 +187,6 @@ class _ResultsPageState extends State<ResultsPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(widget.taskName,
-                    style: const TextStyle(fontSize: 22,
-                        decoration: TextDecoration.underline)),
                 const SizedBox(height: 12),
 
                 // ── bulk classification bar ─────────────────

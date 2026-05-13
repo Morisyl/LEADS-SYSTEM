@@ -118,7 +118,7 @@ class _ExecutionPageState extends State<ExecutionPage> {
   bool _capturePending = false;
 
   Future<void> _fetchStatus() async {
-    if (_capturePending) return; // don't spam while picker window is open
+    if (_capturePending) return; // don't spam while picker window is open [cite: 62, 63]
     try {
       final response = await http
           .get(Uri.parse('$_baseUrl/tasks/${widget.taskId}'))
@@ -127,56 +127,77 @@ class _ExecutionPageState extends State<ExecutionPage> {
       if (!mounted) return;
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        final newStatus = (data['status'] as String? ?? 'INITIALIZING').toUpperCase();
+        final data = jsonDecode(response.body) as Map<String, dynamic>; 
+        final newStatus = (data['status'] as String? ?? 'INITIALIZING').toUpperCase(); 
+        final error = data['error'] as String?; // Extracted error field
 
         setState(() {
-          _status       = newStatus;
-          _leadCount    = data['lead_count']    as int? ?? 0;
-          _companyCount = data['company_count'] as int? ?? 0;
-          if (data['logs'] != null) {
-            _logs = List<String>.from(data['logs'] as List);
+          _status       = newStatus; 
+          _leadCount    = data['lead_count']    as int? ?? 0; 
+          _companyCount = data['company_count'] as int? ?? 0; 
+          if (data['logs'] != null) { 
+            _logs = List<String>.from(data['logs'] as List); 
           }
         });
 
-        // When the backend signals training is needed, open VisualTrainerPage
-        // once. The guard prevents re-pushing while the page is already open.
-        if (newStatus == 'AWAITING_TRAINING' && !_recipeCheckShown) {
-          _recipeCheckShown = true;  // Prevent repeated calls
+        // When the backend signals training is needed, open VisualTrainerPage once. [cite: 67, 68]
+        // The guard prevents re-pushing while the page is already open. [cite: 68, 69]
+        if (newStatus == 'AWAITING_TRAINING' && !_recipeCheckShown) { 
+          _recipeCheckShown = true; 
+          // Prevent repeated calls [cite: 70]
           await _checkExistingRecipe(_toInspectorUrl(widget.promptOrUrl));
-          // After recipe check, if still AWAITING_TRAINING, open training flow
-          if (mounted && _status == 'AWAITING_TRAINING' && !_trainingOpen) {
-            _openTrainingFlow();
+          
+          // After recipe check, if still AWAITING_TRAINING, open training flow [cite: 71]
+          if (mounted && _status == 'AWAITING_TRAINING' && !_trainingOpen) { 
+            _openTrainingFlow(); 
           }
         }
 
-        if (newStatus == 'AWAITING_REVIEW' && !_reviewNavigated) {
-          _reviewNavigated = true;
-          _stopPolling();
-          if (!mounted) return;
+        if (newStatus == 'AWAITING_REVIEW' && !_reviewNavigated) { 
+          _reviewNavigated = true; 
+          _stopPolling(); 
+          if (!mounted) return; 
           Navigator.pushReplacement(
             context,
             MaterialPageRoute(
               builder: (_) => ResultsPage(
-                taskId:        widget.taskId,
-                taskName:      widget.promptOrUrl,
-                pendingReview: true,
+                taskId:        widget.taskId, 
+                taskName:      widget.promptOrUrl, 
+                pendingReview: true, 
               ),
             ),
           );
-          return;
+          return; 
         }
         
         // Navigate away when the task finishes
-        if (newStatus == 'COMPLETED') {
+        if (newStatus == 'COMPLETED') { 
+          _stopPolling(); 
+          // Small delay to ensure final DB writes complete [cite: 76]
+          await Future.delayed(const Duration(milliseconds: 500)); 
+          _navigateToResults(); 
+        }
+
+        // ADDED: Handle FAILED state and show SnackBar
+        if (newStatus == 'FAILED') {
           _stopPolling();
-          // Small delay to ensure final DB writes complete
-          await Future.delayed(const Duration(milliseconds: 500));
-          _navigateToResults();
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(error ?? 'Task failed. Check logs for details.'),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 10),
+              action: SnackBarAction(
+                label: 'Dismiss',
+                textColor: Colors.white,
+                onPressed: () {},
+              ),
+            ),
+          );
         }
       }
     } on Exception catch (e) {
-      debugPrint('Status poll error: $e');
+      debugPrint('Status poll error: $e'); 
     }
   }
 

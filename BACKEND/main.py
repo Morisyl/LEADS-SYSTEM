@@ -137,6 +137,7 @@ class Orchestrator:
                 "company_count": task.get("company_count", 0),
                 "target_url":    task.get("target_url"),
                 "industry":      task.get("industry", "General"),
+                "error":         task.get("error"),  # ADD THIS LINE
             }
 
         db_data = self.db.get_task_status(task_id)
@@ -148,6 +149,7 @@ class Orchestrator:
                 "logs":          ["Task loaded from archive."],
                 "target_url":    None,
                 "industry":      db_data.get("industry", "General"),
+                "error":         None,  # ADD THIS LINE
             }
         return None
 
@@ -207,29 +209,74 @@ class Orchestrator:
     # Background pipeline: document upload
     # ----------------------------------------------------------
 
-    def run_doc_pipeline(self, task_id: str, file_path: str, industry: str):
-        """OCR → Groq extraction → Serper discovery → scraping."""
+    def run_doc_pipeline(self, task_id: str, filepath: str, industry: str):
+        """
+        Background worker: processes uploaded document, extracts text, 
+        generates search queries, and feeds them to the search engine.
+        """
         try:
-            self.update_task_memory(task_id, "EXTRACTING", "Step 1/4: OCR processing document.")
-            doc_dict = self.doc_tool.file_to_text_dict(file_path)
-
-            self.update_task_memory(task_id, "EXTRACTING", "Step 2/4: Groq extracting companies & emails.")
-            leads = self.extractor.extract_leads_structured(doc_dict)
-            self.active_tasks[task_id]["company_count"] = len(leads)
-
-            self.update_task_memory(task_id, "EXTRACTING", "Step 3/4: Serper discovering contact pages.")
-            for lead in leads:
-                if lead.get("company", "Unknown") != "Unknown":
-                    urls = self.search_engine.company_names({lead["company"]})
+            self.update_task_memory(task_id, "EXTRACTING", "Processing uploaded document...")
+            
+            # Step 1: Extract text from document using DocTool
+            print(f"[DocPipeline] Extracting text from: {filepath}")
+            doc_dict = self.doc_tool.file_to_text_dict(filepath)
+            
+            if not doc_dict:
+                raise ValueError("Document extraction returned no pages")
+            
+            print(f"[DocPipeline] Extracted {len(doc_dict)} page chunks")
+            self.update_task_memory(task_id, "EXTRACTING", f"Extracted {len(doc_dict)} page chunks from document")
+            
+            # Step 2: Extract structured leads from the document text
+            print(f"[DocPipeline] Extracting company-email pairs...")
+            structured_leads = self.extractor.extract_leads_structured(doc_dict)
+            
+            if not structured_leads:
+                raise ValueError("No companies or emails could be extracted from document")
+            
+            print(f"[DocPipeline] Found {len(structured_leads)} companies")
+            self.update_task_memory(task_id, "EXTRACTING", f"Found {len(structured_leads)} companies")
+            
+            # Step 3: Enrich with URLs using search engine
+            print(f"[DocPipeline] Enriching leads with URLs...")
+            enriched_leads = []
+            for idx, lead in enumerate(structured_leads, 1):
+                company_name = lead.get('company', '')
+                if company_name:
+                    print(f"[DocPipeline] Searching for: {company_name} ({idx}/{len(structured_leads)})")
+                    self.update_task_memory(
+                        task_id, "EXTRACTING", 
+                        f"Looking up: {company_name} ({idx}/{len(structured_leads)})"
+                    )
+                    
+                    # Use search engine to find company URL
+                    # company_names() returns a Set[str] of contact URLs
+                    urls = self.search_engine.company_names({company_name})
                     if urls:
-                        lead["url"] = list(urls)[0]
-
-            self.update_task_memory(task_id, "EXTRACTING", "Step 4/4: Scraping contact pages.")
-            self.company_sites_agent.company_sites(task_id, leads, industry)
-
+                        lead['url'] = next(iter(urls))  # take the first URL
+                    
+                    enriched_leads.append(lead)
+            
+            # Step 4: Send to output server for review
+            print(f"[DocPipeline] Sending {len(enriched_leads)} leads for review")
+            self.output_server(task_id, enriched_leads, industry)
+            print(f"[DocPipeline] Task {task_id[:8]} completed successfully")
+            
+        except ValueError as ve:
+            # Validation errors (empty text, no queries, etc.)
+            error_msg = f"Document processing validation error: {str(ve)}"
+            print(f"[DocPipeline ERROR] {error_msg}")
+            self.update_task_memory(task_id, "FAILED", error_msg)
+            self.active_tasks[task_id]["error"] = str(ve)
+            
         except Exception as e:
-            self.db.update_task_status(task_id, "failed")
-            self.update_task_memory(task_id, "FAILED", f"Pipeline error: {e}")
+            # Unexpected errors
+            error_msg = f"Document processing failed: {type(e).__name__}: {str(e)}"
+            print(f"[DocPipeline ERROR] {error_msg}")
+            import traceback
+            traceback.print_exc()
+            self.update_task_memory(task_id, "FAILED", error_msg)
+            self.active_tasks[task_id]["error"] = str(e)
 
     # ----------------------------------------------------------
     # Background pipeline: text / prompt search
@@ -621,6 +668,23 @@ def download_results(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+@app.get("/leads/by-industry/{industry}", dependencies=[Depends(verify_token)])
+def get_leads_by_industry(industry: str):
+    """
+    Returns all leads filtered by industry for the Browse Industry Leads page.
+    """
+    leads = core.db.get_leads_by_industry(industry)
+    return leads
+
+@app.get("/leads/industries", dependencies=[Depends(verify_token)])
+def get_all_industries():
+    """
+    Returns a list of all unique industries that have leads in the database.
+    """
+    industries = core.db.get_all_industries()
+    return industries
+
 
 @app.get("/tasks/{task_id}/leads", dependencies=[Depends(verify_token)])
 def get_task_leads(task_id: str):

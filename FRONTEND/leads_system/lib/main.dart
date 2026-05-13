@@ -283,84 +283,87 @@ class _HomePageState extends State<HomePage> {
 
             // SEARCH PILL [cite: 3, 6]
             // MIDDLE: Search Pill & Add Button
+            // MIDDLE: Search Pill & Add Button
             Expanded(
               flex: 1,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      // Plus Button (Detached Circle)
-                      GestureDetector(
-                        onTap: _pickFiles,
-                        child: Container(
-                          width: 75, height: 75,
-                          decoration: const BoxDecoration(color: Colors.black, shape: BoxShape.circle),
-                          child: Icon(Icons.add, color: _attachedFiles.isNotEmpty ? Colors.greenAccent : Colors.white, size: 35),
-                        ),
-                      ),
-                      const SizedBox(width: 25),
-                      // Input Pill
-                      Container(
-                        width: 600, height: 75,
-                        padding: const EdgeInsets.symmetric(horizontal: 25),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(40),
-                          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 20, offset: Offset(0, 10))],
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: _promptController,
-                                style: const TextStyle(fontSize: 20),
-                                decoration: const InputDecoration(hintText: "Enter prompt or url", border: InputBorder.none),
-                              ),
-                            ),
-                            IconButton(
-                              onPressed: canSend ? _showNamingPopup : null,
-                              icon: Icon(Icons.send_rounded, color: canSend ? Colors.black : Colors.grey),
-                            )
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-      
-                  // NEW: Visual File Preview Chip
-                  if (_attachedFiles.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 15.0),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: Colors.greenAccent.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: Colors.greenAccent.withValues(alpha: 0.5)),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.description, size: 18, color: Colors.green),
-                            const SizedBox(width: 8),
-                            Text(
-                              _attachedFiles.first.name, 
-                              style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87)
-                            ),
-                            const SizedBox(width: 8),
-                            GestureDetector(
-                              onTap: () => setState(() => _attachedFiles.clear()),
-                              child: const Icon(Icons.close, size: 18, color: Colors.redAccent),
-                                ),
-                              ],
-                            ),
+              child: SingleChildScrollView(  // ADD THIS WRAPPER
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        // Plus Button (Detached Circle)
+                        GestureDetector(
+                          onTap: _pickFiles,
+                          child: Container(
+                            width: 75, height: 75,
+                            decoration: const BoxDecoration(color: Colors.black, shape: BoxShape.circle),
+                            child: Icon(Icons.add, color: _attachedFiles.isNotEmpty ? Colors.greenAccent : Colors.white, size: 35),
                           ),
                         ),
-                        ],
-                      ),
+                        const SizedBox(width: 25),
+                        // Input Pill
+                        Container(
+                          width: 600, height: 75,
+                          padding: const EdgeInsets.symmetric(horizontal: 25),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(40),
+                            boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 20, offset: Offset(0, 10))],
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: _promptController,
+                                  style: const TextStyle(fontSize: 20),
+                                  decoration: const InputDecoration(hintText: "Enter prompt or url", border: InputBorder.none),
+                                ),
+                              ),
+                              IconButton(
+                                onPressed: canSend ? _showNamingPopup : null,
+                                icon: Icon(Icons.send_rounded, color: canSend ? Colors.black : Colors.grey),
+                              )
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
+
+                    // NEW: Visual File Preview Chip
+                    if (_attachedFiles.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 15.0),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.greenAccent.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: Colors.greenAccent.withValues(alpha: 0.5)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.description, size: 18, color: Colors.green),
+                              const SizedBox(width: 8),
+                              Text(
+                                _attachedFiles.first.name, 
+                                style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87)
+                              ),
+                              const SizedBox(width: 8),
+                              GestureDetector(
+                                onTap: () => setState(() => _attachedFiles.clear()),
+                                child: const Icon(Icons.close, size: 18, color: Colors.redAccent),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),  // ADD THIS CLOSING PARENTHESIS FOR SingleChildScrollView
+            ),
 
             // TASK TILES [cite: 7-12]
             Expanded(

@@ -196,4 +196,21 @@ class DBManager:
                     "tier": row["current_tier"],
                     "state": json.loads(row["progress_state"]) if row["progress_state"] else {}
                 }
-            return None    
+            return None 
+
+    def get_leads_by_industry(self, industry: str) -> List[Dict]:
+        """Retrieves all leads for a specific industry."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM leads_library WHERE LOWER(industry) = LOWER(?) ORDER BY created_at DESC", 
+                (industry,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+    
+    def get_all_industries(self) -> List[str]:
+        """Returns a list of all unique industries in the database."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT industry FROM leads_library WHERE industry IS NOT NULL ORDER BY industry"
+            ).fetchall()
+            return [row[0] for row in rows if row[0]]       
