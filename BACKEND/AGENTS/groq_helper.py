@@ -187,12 +187,21 @@ page) as primary_selector.  Do NOT select a child <a>, <span>, or <td> inside it
 {primary_html[:1500] if primary_html else "NOT PROVIDED"}
 
 === PAGINATION ELEMENT — THE EXACT HTML THE USER PROVIDED ===
-CRITICAL RULE: Derive pagination_selector from the root tag of this HTML block.
-If pagination is a <ul> or <li> container, select the <a> INSIDE the non-active
-<li> that has an href — that is the "next page" link.
-Ensure the CSS selector is syntactically valid: every class must be preceded by a dot.
-Example of INVALID selector: "ul.pagination enf-pagination li a"  ← missing dot
-Example of VALID   selector: "ul.pagination.enf-pagination li a"  ← correct
+CRITICAL RULES FOR PAGINATION:
+1. Examine the HTML below. Look for an <a> tag that contains an href attribute.
+   The href may be on the element itself OR on a parent <a> wrapping an inner
+   icon (e.g. <a href="/dir?page=2"><i class="fa fa-chevron-right"></i></a>).
+2. If ANY href exists (even a relative one like "?page=2" or "/dir/page/2"):
+   - Set pagination_href = true
+   - Set method = "URL_NAVIGATION"
+   - Set pagination_selector to target the <a> TAG ITSELF, not the inner <i>
+     or <span>. Example: if the HTML is <a class="next" href="..."><i/></a>
+     the selector must be "a.next", never "a.next i".
+3. Only set method = "SELENIUM" and pagination_href = false when there is
+   genuinely NO href anywhere in the pagination HTML (pure JS button).
+4. Every class in the CSS selector must be preceded by a dot.
+   INVALID: "ul.pagination enf-pagination li a"
+   VALID:   "ul.pagination.enf-pagination li a"
 
 {pagination_html[:800] if pagination_html else "NOT PROVIDED"}
 """
@@ -247,8 +256,10 @@ VALIDATION RULES:
    - If the text is already clean, use r".+" (matches any non-empty string).
    - Always escape backslashes: \\d not \d.
 5. pagination_selector MUST be syntactically valid CSS (every class preceded by a dot).
-6. For pagination: plain href → pagination_href=true, method="BS4".
-                   JS button  → pagination_href=false, method="SELENIUM".
+   It MUST target the <a> tag that carries the href, never an inner icon element.
+6. If an href exists on or wrapping the pagination element:
+     pagination_href=true, method="URL_NAVIGATION".
+   Only use method="SELENIUM" when there is genuinely no href (pure JS button).
 7. All required keys must be non-empty strings. Use "" only for optional fields.
 8. Simpler selectors are more robust — prefer tag.class over :nth-child chains.
 CRITICAL: Return regex_pattern as a RAW regex string WITHOUT Python notation.
@@ -312,7 +323,7 @@ CORRECT: "regex_pattern": "[A-Za-z]+"
 
         # Normalise method
         method = recipe.get("method", "SELENIUM").upper().strip()
-        recipe["method"] = method if method in ("BS4", "SELENIUM") else "SELENIUM"
+        recipe["method"] = method if method in ("BS4", "SELENIUM", "URL_NAVIGATION") else "SELENIUM"
 
         # Fix a common Groq mistake: pagination_selector with a space before a class
         # name instead of a dot (e.g. "ul.pagination enf-pagination li a").
@@ -346,6 +357,9 @@ CORRECT: "regex_pattern": "[A-Za-z]+"
 
         # Ensure optional keys exist
         recipe.setdefault("last_page_selector", "")
+        # Preserve last_page_number sent from Flutter (integer, default 10)
+        if "last_page_number" not in recipe:
+            recipe["last_page_number"] = 10
         recipe.setdefault("pagination_href",
                           recipe["method"] == "BS4")
 

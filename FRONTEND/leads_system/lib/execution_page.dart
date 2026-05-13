@@ -47,6 +47,7 @@ class _ExecutionPageState extends State<ExecutionPage> {
   // ── Polling timers ──────────────────────────────────────────────────────────
   Timer? _statusTimer;
   Timer? _frameTimer;
+  bool _reviewNavigated = false;  // separate from _recipeCheckShown
 
   // ── Task state (driven by backend polling) ──────────────────────────────────
   String _status       = 'INITIALIZING';
@@ -68,7 +69,8 @@ class _ExecutionPageState extends State<ExecutionPage> {
   _CapturedSelector? _primarySelector;
   _CapturedSelector? _paginationSelector;
   _CapturedSelector? _subpageSelector;     // Tier 2 only: element to extract inside subpage
-  _CapturedSelector? _lastPageSelector;    // Tier 1/2: optional last-page indicator
+  _CapturedSelector? _lastPageSelector;    // kept for reference; no longer captured
+  int _lastPageNumber = 10;               // user-defined page limit
 
   // ── Start-button guard ───────────────────────────────────────────────────────
   bool _startInProgress = false;
@@ -148,6 +150,23 @@ class _ExecutionPageState extends State<ExecutionPage> {
           }
         }
 
+        if (newStatus == 'AWAITING_REVIEW' && !_reviewNavigated) {
+          _reviewNavigated = true;
+          _stopPolling();
+          if (!mounted) return;
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ResultsPage(
+                taskId:        widget.taskId,
+                taskName:      widget.promptOrUrl,
+                pendingReview: true,
+              ),
+            ),
+          );
+          return;
+        }
+        
         // Navigate away when the task finishes
         if (newStatus == 'COMPLETED') {
           _stopPolling();
@@ -306,24 +325,38 @@ class _ExecutionPageState extends State<ExecutionPage> {
       
       // Auto-fill pagination selector from manual-entry pagination HTML.
       if (manualPagHtml.isNotEmpty && _paginationSelector == null) {
-        final pagTagMatch   = RegExp(r'^<([a-zA-Z][a-zA-Z0-9]*)').firstMatch(manualPagHtml);
+        // Derive a selector specific enough to target the next-page link.
+        // Priority: id > class > href attribute fragment.
+        String pagSel = 'a';
         
-        // FIX: Removed the 'r' prefix so the escaped single quotes evaluate correctly
-        final pagClassMatch = RegExp('class=["\']([^"\']+)["\']').firstMatch(manualPagHtml);
-        
-        final pagTag        = pagTagMatch?.group(1)?.toLowerCase() ?? 'a';
-        final pagClass      = pagClassMatch?.group(1)?.split(RegExp(r'\s+'))
-                                  .where((c) => c.isNotEmpty).first ?? '';
-        final pagSel        = pagClass.isNotEmpty ? '$pagTag.$pagClass' : pagTag;
-        
-        setState(() {
-          _paginationSelector = _CapturedSelector(
-            label:     'Pagination (from manual entry)',
-            selector:  pagSel,
-            outerHtml: manualPagHtml,
-          );
-        });
-        _addLog('Auto-filled pagination from manual entry: $pagSel');
+        // FIX: Using r'''...''' allows both " and ' inside the raw string without escaping.
+        final idMatch    = RegExp(r'''id=["']([^"']+)["']''').firstMatch(manualPagHtml);
+        final classMatch = RegExp(r'''class=["']([^"']+)["']''').firstMatch(manualPagHtml);
+        final hrefMatch  = RegExp(r'''href=["']([^"']+)["']''').firstMatch(manualPagHtml);
+
+        if (idMatch != null) {
+          pagSel = 'a#${idMatch.group(1)!.trim().split(' ').first}';
+        } else if (classMatch != null) {
+          final classes = classMatch.group(1)!.trim().split(RegExp(r'\s+'));
+          pagSel = 'a.${classes.take(2).join('.')}';
+        } else if (hrefMatch != null) {
+          // No id or class — use the href path as an attribute selector.
+          // e.g. href="/directory/installer/China?page=2"
+          // → a[href*="/directory/installer/China"]
+          final hrefVal = hrefMatch.group(1)!;
+          final Uri? hrefUri = Uri.tryParse(hrefVal);
+          final String hrefPath = (hrefUri != null && hrefUri.path.isNotEmpty)
+              ? hrefUri.path  // strip query string, keep the stable path part
+              : hrefVal;
+          pagSel = 'a[href*="${hrefPath.replaceAll('"', '')}"]';
+        }
+
+        _addLog('Auto-derived pagination selector: $pagSel');
+        _paginationSelector = _CapturedSelector(
+          label:     'Pagination',
+          selector:  pagSel,
+          outerHtml: manualPagHtml,
+        );
       }
 
       // DEBUG — print exactly what is handed to the onCapture callback so we
@@ -444,21 +477,19 @@ class _ExecutionPageState extends State<ExecutionPage> {
         'domain':          domain,
         'pagination_type': method.toLowerCase(),
         'selectors': {
-          'item_container':         _primarySelector!.selector,
-          'next_button':            _paginationSelector?.selector ?? '',
-          'subpage':                _subpageSelector?.selector    ?? '',
-          'last_page':              _lastPageSelector?.selector   ?? '',
+          'item_container': _primarySelector!.selector,
+          'next_button':    _paginationSelector?.selector ?? '',
+          'subpage':        _subpageSelector?.selector    ?? '',
         },
-        // Raw HTML of each clicked element — forwarded to Groq for validation
         'element_html': {
           'primary':    _primarySelector!.outerHtml,
           'pagination': _paginationSelector?.outerHtml ?? '',
           'subpage':    _subpageSelector?.outerHtml    ?? '',
-          'last_page':  _lastPageSelector?.outerHtml   ?? '',
         },
-        'site_url':  targetUrl,
-        'tier':      _selectedTier,
-        'max_pages': 10,
+        'site_url':        targetUrl,
+        'tier':            _selectedTier,
+        'last_page_number': _lastPageNumber,
+        'max_pages':        _lastPageNumber,
       });
 
       final recipeResp = await http.post(
@@ -514,15 +545,13 @@ class _ExecutionPageState extends State<ExecutionPage> {
       'primary_selector':   _primarySelector?.selector    ?? '',
       'pagination_selector':_paginationSelector?.selector ?? '',
       'subpage_selector':   _subpageSelector?.selector    ?? '',
-      'last_page_selector': _lastPageSelector?.selector   ?? '',
       'method':             _selectedTier == 1 ? 'BS4' : 'SELENIUM',
-      'max_pages':          10,
-      // outerHTML of every captured element — used by Groq to validate selectors
+      'last_page_number':   _lastPageNumber,
+      'max_pages':          _lastPageNumber,
       'element_html': {
         'primary':    _primarySelector?.outerHtml    ?? '',
         'pagination': _paginationSelector?.outerHtml ?? '',
         'subpage':    _subpageSelector?.outerHtml    ?? '',
-        'last_page':  _lastPageSelector?.outerHtml   ?? '',
       },
     };
 
@@ -1394,7 +1423,7 @@ Future<void> _startWithRecipe(String url, Map<String, dynamic> recipe) async {
               const Divider(color: Colors.white12),
               const SizedBox(height: 8),
               const Text(
-                'LAST-PAGE INDICATOR (OPTIONAL)',
+                'PAGE LIMIT',
                 style: TextStyle(
                   color: Colors.white38, fontSize: 10,
                   fontWeight: FontWeight.bold, letterSpacing: 1.2,
@@ -1402,21 +1431,28 @@ Future<void> _startWithRecipe(String url, Map<String, dynamic> recipe) async {
               ),
               const SizedBox(height: 4),
               const Text(
-                'Click the element that appears when you are on the last page '
-                '(e.g. a disabled "Next" button). Skip if none.',
+                'How many pages should the extractor visit at most?',
                 style: TextStyle(color: Colors.white54, fontSize: 12),
               ),
               const SizedBox(height: 10),
-              if (_lastPageSelector != null)
-                _buildCapturedBadge(_lastPageSelector!),
-              const SizedBox(height: 8),
-              _wizardButton(
-                label: _lastPageSelector == null
-                    ? 'CAPTURE LAST-PAGE INDICATOR'
-                    : 'RE-CAPTURE',
-                icon:  Icons.last_page,
-                color: Colors.orangeAccent,
-                onTap: _captureLastPageSelector,
+              TextFormField(
+                initialValue: '10',
+                keyboardType: TextInputType.number,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  labelText: 'Last page number',
+                  labelStyle: TextStyle(color: Colors.white54),
+                  enabledBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: Colors.white24),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: Colors.greenAccent),
+                  ),
+                ),
+                onChanged: (v) {
+                  final n = int.tryParse(v);
+                  if (n != null && n > 0) setState(() => _lastPageNumber = n);
+                },
               ),
               const SizedBox(height: 12),
               _wizardButton(

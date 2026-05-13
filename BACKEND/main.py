@@ -108,6 +108,7 @@ class Orchestrator:
                 "logs": [],
                 "target_url": None,
                 "industry": industry,
+                "pending_leads": [],   # leads held for user review before DB write
             }
 
     def update_task_memory(self, task_id: str, status: str, log: str = None):
@@ -124,22 +125,29 @@ class Orchestrator:
 
     def get_task_info(self, task_id: str) -> Optional[Dict[str, Any]]:
         """
-        Returns the live in-memory record first.
-        Falls back to the DB so that completed / historical tasks
-        are still accessible after a server restart.
+        Returns a SAFE poll payload — never includes pending_leads.
+        pending_leads is only served by the dedicated /tasks/{id}/pending endpoint.
         """
         if task_id in self.active_tasks:
-            return self.active_tasks[task_id]
+            task = self.active_tasks[task_id]
+            return {
+                "status":        task.get("status", ""),
+                "logs":          task.get("logs", []),
+                "lead_count":    task.get("lead_count", 0),
+                "company_count": task.get("company_count", 0),
+                "target_url":    task.get("target_url"),
+                "industry":      task.get("industry", "General"),
+            }
 
         db_data = self.db.get_task_status(task_id)
         if db_data:
             return {
-                "status": db_data["status"].upper(),
-                "lead_count": db_data["lead_count"],
+                "status":        db_data["status"].upper(),
+                "lead_count":    db_data["lead_count"],
                 "company_count": 0,
-                "logs": ["Task loaded from archive."],
-                "target_url": None,
-                "industry": db_data.get("industry", "General"),
+                "logs":          ["Task loaded from archive."],
+                "target_url":    None,
+                "industry":      db_data.get("industry", "General"),
             }
         return None
 
@@ -149,21 +157,52 @@ class Orchestrator:
 
     def output_server(self, task_id: str, structured_leads: List[Dict[str, Any]], industry: str):
         """
-        Final landing zone for every agent.
+        Intercepts leads before DB write.
+        Flattens to one row per email, stores in task memory, and sets
+        status to AWAITING_REVIEW so Flutter navigates to the review screen.
         structured_leads format:
             [{'company': 'Acme', 'emails': ['a@acme.com'], 'url': 'https://acme.com'}, ...]
         """
-        self.db.save_leads_batch(task_id, structured_leads, industry)
+        flat: List[Dict[str, Any]] = []
+        seen_companies: set = set()
 
-        # Refresh the live count so the Flutter polling loop sees it immediately
-        task_db = self.db.get_task_status(task_id)
-        if task_db and task_id in self.active_tasks:
-            self.active_tasks[task_id]["lead_count"] = task_db["lead_count"]
-            self.active_tasks[task_id]["company_count"] = task_db.get("company_count", len(structured_leads))
+        for record in structured_leads:
+            company = record.get("company", "Unknown")
+            url     = record.get("url", "")
+            emails  = record.get("emails", [])
 
-        self.db.update_task_status(task_id, "completed")
-        self.update_task_memory(task_id, "COMPLETED",
-                                f"Pipeline finished. {len(structured_leads)} lead records saved.")
+            # Deduplicate companies entirely — one row per company
+            if company in seen_companies:
+                continue
+            seen_companies.add(company)
+
+            # Pick the first non-noreply email, fall back to first available
+            chosen_email = ""
+            for e in emails:
+                e = e.strip().lower()
+                if e and "@" in e and not any(
+                    e.startswith(p) for p in ("noreply", "no-reply", "donotreply")
+                ):
+                    chosen_email = e
+                    break
+            if not chosen_email and emails:
+                chosen_email = emails[0].strip().lower()
+
+            flat.append({
+                "company":  company,
+                "email":    chosen_email,
+                "url":      url,
+                "industry": industry,
+                "region":   "",
+            })
+
+        self._ensure_task(task_id)
+        self.active_tasks[task_id]["pending_leads"]  = flat
+        self.active_tasks[task_id]["lead_count"]     = len(flat)
+        self.update_task_memory(
+            task_id, "AWAITING_REVIEW",
+            f"{len(flat)} leads ready for review."
+        )
     # ----------------------------------------------------------
     # Background pipeline: document upload
     # ----------------------------------------------------------
@@ -393,6 +432,28 @@ async def get_task_frame(task_id: str):
     return {"frame": None}
 
 
+@app.get("/tasks/{task_id}", dependencies=[Depends(verify_token)])
+def get_task(task_id: str):
+    task = core.active_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    resp = {
+        "task_id":    task_id,
+        "status":     task.get("status", ""),
+        "log":        task.get("log", ""),
+        "lead_count": task.get("lead_count", 0),
+    }
+
+    # Piggyback pending leads onto the AWAITING_REVIEW poll so Flutter
+    # can navigate AND render the table in a single round-trip.
+    if task.get("status") == "AWAITING_REVIEW":
+        resp["pending_leads"] = task.get("pending_leads", [])
+
+    return resp
+
+
+
 # ----------------------------------------------------------
 # 5.  Document upload
 # ----------------------------------------------------------
@@ -568,6 +629,65 @@ def get_task_leads(task_id: str):
     if not leads:
         return []
     return leads
+
+
+@app.get("/tasks/{task_id}/pending", dependencies=[Depends(verify_token)])
+def get_pending_leads(task_id: str):
+    """
+    Returns in-memory leads awaiting user review/classification.
+    Only present while status == AWAITING_REVIEW.
+    """
+    task = core.active_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found in memory.")
+    return task.get("pending_leads", [])
+
+
+@app.post("/tasks/{task_id}/confirm", dependencies=[Depends(verify_token)])
+def confirm_leads(task_id: str, body: dict = Body(...)):
+    """
+    Receives the user-classified leads from ResultsPage and writes them to DB.
+    Expected body:
+        { "leads": [ { "company": "...", "email": "...", "url": "...",
+                       "industry": "...", "region": "..." }, ... ] }
+    """
+    task = core.active_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found in memory.")
+
+    confirmed: List[Dict[str, Any]] = body.get("leads", [])
+    if not confirmed:
+        raise HTTPException(status_code=400, detail="No leads provided.")
+
+    # Re-group into the format save_leads_batch expects:
+    # [{'company': str, 'emails': [str, ...], 'url': str}]
+    grouped: Dict[str, Dict] = {}
+    for row in confirmed:
+        key = row.get("url", row.get("company", "unknown"))
+        if key not in grouped:
+            grouped[key] = {
+                "company":  row.get("company", "Unknown"),
+                "emails":   [],
+                "url":      row.get("url", ""),
+                "industry": row.get("industry", "General"),
+                "region":   row.get("region", ""),
+            }
+        email = row.get("email", "").strip()
+        if email:
+            grouped[key]["emails"].append(email)
+
+    lead_list = list(grouped.values())
+    industry  = confirmed[0].get("industry", "General") if confirmed else "General"
+
+    core.db.save_leads_batch(task_id, lead_list, industry)
+    core.db.update_task_status(task_id, "completed", lead_count=len(confirmed))
+    task["pending_leads"] = []
+    core.update_task_memory(
+        task_id, "COMPLETED",
+        f"Pipeline finished. {len(confirmed)} leads saved after review."
+    )
+    return {"ok": True, "saved": len(confirmed)}
+
 
 # ----------------------------------------------------------
 # 10.  Shutdown hook

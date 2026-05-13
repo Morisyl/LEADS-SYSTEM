@@ -187,7 +187,11 @@ class ListingsSiteAgent:
             user_selectors     = user_selectors,
             page_html_context  = page_html_context,
         )
-        self.recipe["max_pages"] = int(raw_recipe.get("max_pages", DEFAULT_MAX_PAGES))
+        self.recipe["max_pages"] = int(raw_recipe.get(
+            "last_page_number",
+            raw_recipe.get("max_pages", DEFAULT_MAX_PAGES)
+        ))
+        self.recipe.setdefault("last_page_number", self.recipe["max_pages"])
 
         self._log("EXTRACTING",
                   f"Recipe ready — primary: '{self.recipe.get('primary_selector')}' | "
@@ -348,7 +352,7 @@ class ListingsSiteAgent:
             if method == "BS4":
                 current_url = self._next_url_from_soup(soup, current_url)
             else:
-                if self._is_last_page():
+                if self._is_last_page(pages_done):
                     self._log("EXTRACTING", "Tier 1 — last page indicator found, stopping.")
                     break
                 current_url = self._selenium_next_page()
@@ -417,7 +421,7 @@ class ListingsSiteAgent:
 
             self._log("EXTRACTING", f"Collected {len(all_subpage_urls)} subpage links so far.")
 
-            if self._is_last_page():
+            if self._is_last_page(pages_done):
                 self._log("EXTRACTING", "Tier 2 — last page reached, stopping link collection.")
                 break
             next_url = self._selenium_next_page()
@@ -547,7 +551,7 @@ class ListingsSiteAgent:
             }
             self.core.db.update_task_progress(self.task_id, 3, progress_state)
 
-            if self._is_last_page():
+            if self._is_last_page(pages_done):
                 self._log("EXTRACTING", "Tier 3 — last page reached, stopping harvest.")
                 break
 
@@ -587,11 +591,18 @@ class ListingsSiteAgent:
     # PAGINATION HELPERS
     # =========================================================================
 
-    def _is_last_page(self) -> bool:
+    def _is_last_page(self, pages_done: int = 0) -> bool:
         """
-        Returns True if the last-page indicator element is present in the DOM.
-        Only meaningful when last_page_selector is configured.
+        Primary check: stop when pages_done >= last_page_number (user-defined limit).
+        Fallback DOM check retained for sites that have a last_page_selector and the
+        page count limit has not been reached yet.
         """
+        limit = int(self.recipe.get("last_page_number",
+                                     self.recipe.get("max_pages", DEFAULT_MAX_PAGES)))
+        if pages_done >= limit:
+            self._log("EXTRACTING", f"Page limit reached ({pages_done}/{limit}), stopping.")
+            return True
+
         sel = self.recipe.get("last_page_selector", "").strip()
         if not sel:
             return False
@@ -619,26 +630,61 @@ class ListingsSiteAgent:
 
     def _selenium_next_page(self) -> Optional[str]:
         """
-        Selenium path: click the Next button.
-        Handles both plain href and JS/AJAX buttons.
-        Returns the new URL or None when no next page exists.
+        Navigate to the next page.
+
+        Priority order:
+        1. URL_NAVIGATION / BS4 path: read the href from the pagination element
+           via BeautifulSoup, resolve it to an absolute URL with urljoin, then
+           call driver.get().  Handles relative hrefs like "?page=2" or
+           "/directory/page/2" correctly.
+        2. SELENIUM JS-click fallback: used only when no valid href is found.
+
+        Returns the new URL, or None when no next page exists.
         """
-        sel = self.recipe.get("pagination_selector", "").strip()
+        sel    = self.recipe.get("pagination_selector", "").strip()
+        method = self.recipe.get("method", "SELENIUM").upper()
         if not sel:
             return None
+
+        current_url = self.driver.current_url
+
+        # ── Path 1: href-based navigation (URL_NAVIGATION or BS4) ──────────
+        if method in ("URL_NAVIGATION", "BS4"):
+            try:
+                soup = BeautifulSoup(self.driver.page_source, "html.parser")
+                btn  = soup.select_one(sel)
+                if btn:
+                    href = btn.get("href", "").strip()
+                    if href and not href.startswith("javascript"):
+                        absolute_url = urljoin(current_url, href)
+                        self._log("EXTRACTING",
+                                  f"Pagination href resolved: '{href}' → '{absolute_url}'")
+                        self.driver.get(absolute_url)
+                        return self.driver.current_url
+                    # href present but empty / javascript — fall through to click
+                self._log("EXTRACTING",
+                          f"Pagination selector '{sel}' found no usable href; "
+                          "falling back to JS click.")
+            except Exception as e:
+                self._log("EXTRACTING", f"href-resolution error: {e}; falling back to click.")
+
+        # ── Path 2: JS-click fallback ───────────────────────────────────────
         try:
-            btn  = WebDriverWait(self.driver, WAIT_TIMEOUT).until(
+            btn = WebDriverWait(self.driver, WAIT_TIMEOUT).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, sel))
             )
+            # One last attempt to pull href via Selenium before clicking
             href = btn.get_attribute("href") or ""
-
             if href and not href.startswith("javascript"):
-                self.driver.get(href)
-            else:
-                self.driver.execute_script("arguments[0].scrollIntoView(true);", btn)
-                self.driver.execute_script("arguments[0].click();", btn)
-                time.sleep(AJAX_SETTLE)
+                absolute_url = urljoin(current_url, href)
+                self._log("EXTRACTING",
+                          f"Pagination href (Selenium attr) resolved: '{href}' → '{absolute_url}'")
+                self.driver.get(absolute_url)
+                return self.driver.current_url
 
+            self.driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+            self.driver.execute_script("arguments[0].click();", btn)
+            time.sleep(AJAX_SETTLE)
             return self.driver.current_url
 
         except (TimeoutException, NoSuchElementException):
