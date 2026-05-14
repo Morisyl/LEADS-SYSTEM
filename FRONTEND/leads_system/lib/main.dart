@@ -13,6 +13,8 @@ import 'package:http/http.dart' as http;
 import 'execution_page.dart';
 import 'industry_page.dart';
 import 'past_tasks_page.dart';
+import 'login_page.dart';
+import 'auth_service.dart';
 
 // ==========================================
 // 0. ENTRY POINT & APP WRAPPER
@@ -24,6 +26,42 @@ void main() {
   
   runApp(const EnolixApp());
 }
+
+
+class _AuthGate extends StatefulWidget {
+  const _AuthGate();
+  @override
+  State<_AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<_AuthGate> {
+  @override
+  void initState() {
+    super.initState();
+    _checkSession();
+  }
+
+  Future<void> _checkSession() async {
+    final auth = AuthService();
+    final valid = await auth.loadSavedSession();
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => valid ? const HomePage() : const LoginPage(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: Color(0xFF0D0D0D),
+      body: Center(child: CircularProgressIndicator(color: Colors.greenAccent)),
+    );
+  }
+}
+
 
 class EnolixApp extends StatelessWidget {
   const EnolixApp({super.key});
@@ -37,7 +75,7 @@ class EnolixApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xFFF8F9FA),
         fontFamily: 'GoogleSans', // Matches your JKUAT project aesthetic
       ),
-      home: const HomePage(),
+      home: const _AuthGate(),
     );
   }
 }
@@ -119,7 +157,7 @@ class _HomePageState extends State<HomePage> {
   
   // Backend Configuration (Must match main.py)
   final String _baseUrl = "http://localhost:8000";
-  final String _apiKey = "jkuat_secret_2026";
+  final _auth = AuthService();
 
   final List<String> _greetingsPool = [
     "Where shall we start?", "What's our objective today?", "Ready for data extraction.",
@@ -160,7 +198,7 @@ class _HomePageState extends State<HomePage> {
       if (_attachedFiles.isNotEmpty) {
         // Multi-part upload logic...
         var request = http.MultipartRequest('POST', Uri.parse('$_baseUrl/upload'));
-        request.headers['X-API-KEY'] = _apiKey;
+        request.headers['X-API-KEY'] = _auth.token ?? '';
         request.files.add(await http.MultipartFile.fromPath('file', _attachedFiles.first.path!));
         var streamedResponse = await request.send();
         response = await http.Response.fromStream(streamedResponse);
@@ -168,7 +206,7 @@ class _HomePageState extends State<HomePage> {
         // URL or Prompt Search
         response = await http.get(
           Uri.parse('$_baseUrl/search-listings?prompt=${Uri.encodeComponent(_promptController.text)}&industry=$industry'),
-          headers: {'X-API-KEY': _apiKey},
+          headers: {'X-API-KEY': _auth.token ?? ''},
         );
       }
 
@@ -248,11 +286,48 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     bool canSend = _promptController.text.trim().isNotEmpty || _attachedFiles.isNotEmpty;
 
+    final user = _auth.currentUser;
+    final displayName = user?['username'] ?? 'User';
+
     return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        automaticallyImplyLeading: false,
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 16.0),
+            child: Row(
+              children: [
+                const Icon(Icons.account_circle, color: Colors.black54, size: 20),
+                const SizedBox(width: 6),
+                Text(displayName,
+                    style: const TextStyle(
+                        color: Colors.black87, fontWeight: FontWeight.w600)),
+                const SizedBox(width: 12),
+                TextButton.icon(
+                  onPressed: () async {
+                    await _auth.logout();
+                    if (!mounted) return;
+                    Navigator.pushAndRemoveUntil(
+                      context,
+                      MaterialPageRoute(builder: (_) => const LoginPage()),
+                      (_) => false,
+                    );
+                  },
+                  icon: const Icon(Icons.logout, size: 16, color: Colors.redAccent),
+                  label: const Text('Logout',
+                      style: TextStyle(color: Colors.redAccent, fontSize: 13)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: Column(
           children: [
-            // BROWSE BUTTON [cite: 1]
+            // BROWSE BUTTON
             Align(
               alignment: Alignment.topLeft,
               child: Padding(

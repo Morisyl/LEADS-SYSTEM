@@ -8,6 +8,11 @@ class DBManager:
     def __init__(self, db_name="enolix_leads_v3.db"):
         # Ensure the database stays in the DATA folder
         self.db_path = os.path.join(os.path.dirname(__file__), db_name)
+        self._create_users_table()
+        self._create_user_sessions_table()
+        self._create_activity_log_table()
+        self._create_data_access_log_table()
+        self._create_export_log_table()
         self._init_db()
 
     def _get_connection(self):
@@ -76,6 +81,22 @@ class DBManager:
                     FOREIGN KEY(task_id) REFERENCES tasks(task_id)
                 )
             ''')
+             # 4. admin setup — always ensure correct hash regardless of existing row
+            import hashlib
+            _salt = 'defaultsalt00001'
+            _hash = hashlib.sha256(('admin1234' + _salt).encode()).hexdigest()
+            _pwd = f'{_salt}${_hash}'
+            conn.execute(
+                '''INSERT OR IGNORE INTO users
+                   (user_id, username, email, password_hash, full_name, role, is_active)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                ('admin-001', 'admin', 'admin@leadsystem.local',
+                 _pwd, 'System Administrator', 'admin', 1)
+            )
+            conn.execute(
+                'UPDATE users SET password_hash = ?, is_active = 1 WHERE user_id = ?',
+                (_pwd, 'admin-001')
+            )
             conn.commit()
 
     # --- Task / Job Management ---
@@ -213,4 +234,96 @@ class DBManager:
             rows = conn.execute(
                 "SELECT DISTINCT industry FROM leads_library WHERE industry IS NOT NULL ORDER BY industry"
             ).fetchall()
-            return [row[0] for row in rows if row[0]]       
+            return [row[0] for row in rows if row[0]]
+
+    # Add after existing table definitions
+
+    def _create_users_table(self):
+        """Create users authentication table"""
+        with self._get_connection() as conn:
+            conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                full_name TEXT,
+                role TEXT DEFAULT 'viewer',
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP
+            )
+        ''')
+        conn.commit()
+
+    def _create_user_sessions_table(self):
+        """Track active user sessions"""
+        with self._get_connection() as conn:
+            conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                token TEXT UNIQUE NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        ''')
+        conn.commit()
+
+    def _create_activity_log_table(self):
+        """Log all user activities"""
+        with self._get_connection() as conn:
+            conn.execute('''
+            CREATE TABLE IF NOT EXISTS activity_log (
+                log_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                resource_type TEXT,
+                resource_id TEXT,
+                details TEXT,
+                ip_address TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        ''')
+        conn.commit()
+
+    def _create_data_access_log_table(self):
+        """Track what data users viewed"""
+        with self._get_connection() as conn:
+            conn.execute('''
+            CREATE TABLE IF NOT EXISTS data_access_log (
+                access_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                task_id TEXT,
+                company_name TEXT,
+                email_viewed TEXT,
+                viewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+            )
+        ''')
+        conn.commit()
+
+    def _create_export_log_table(self):
+        """Track document exports"""
+        with self._get_connection() as conn:
+            conn.execute('''
+            CREATE TABLE IF NOT EXISTS export_log (
+                export_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                task_id TEXT,
+                export_type TEXT NOT NULL,
+                file_format TEXT,
+                record_count INTEGER,
+                file_path TEXT,
+                exported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+            )
+        ''')
+        conn.commit()               

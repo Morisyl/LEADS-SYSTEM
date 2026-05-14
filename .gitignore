@@ -19,5 +19,5 @@ FRONTEND/leads_system/.dart_tool/
 # env file
 BACKEND/.env
 
-BACKEND/uploads/
+BACKEND/uploads
 

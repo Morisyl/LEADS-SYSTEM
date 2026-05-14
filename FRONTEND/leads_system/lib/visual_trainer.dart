@@ -175,7 +175,7 @@ const _inspectorJs = r"""
       target.classList.add('__ll');
 
       var sel  = cssPath(target);
-      var html = (target.outerHTML || '').substring(0, 3000);
+      var html = (target.innerHTML || '').substring(0, 3000);
 
       window.__leadsSelector = sel;
       window.__leadsHtml     = html;

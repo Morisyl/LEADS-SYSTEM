@@ -11,6 +11,8 @@ from typing import Dict, List, Any, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Header, Query, Body
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
+from fastapi.responses import JSONResponse
 
 # Internal Imports
 from DATA.DBmanager import DBManager
@@ -21,6 +23,7 @@ from AGENTS.company_sites import CompanySites
 from AGENTS.listings_site import ListingsSiteAgent
 from AGENTS.output_server import OutputServer
 from AGENTS.schemas import Recipe
+from AGENTS.auth_manager import AuthManager
 
 
 # ============================================================
@@ -61,10 +64,17 @@ for folder in [UPLOAD_DIR, EXPORT_DIR]:
     folder.mkdir(exist_ok=True)
 
 
-def verify_token(x_api_key: str = Header(...)):
-    """Ensures only the Flutter UI can access protected endpoints."""
-    if x_api_key != INTERNAL_TOKEN:
-        raise HTTPException(status_code=403, detail="Forbidden: Invalid API Key")
+async def verify_token(x_api_key: str = Header(...)):
+    """Ensures only authenticated users can access protected endpoints."""
+    if x_api_key == INTERNAL_TOKEN:
+        # Legacy support - allow internal token for now
+        return {"user_id": "system", "username": "system", "role": "admin"}
+    
+    # New token-based authentication
+    user = core.auth_manager.validate_token(x_api_key)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return user
 
 
 # ============================================================
@@ -74,6 +84,7 @@ def verify_token(x_api_key: str = Header(...)):
 class Orchestrator:
     def __init__(self):
         self.db = DBManager()
+        self.auth_manager = AuthManager(self.db)
         self.doc_tool = DocTool()
         self.extractor = TxtExtractor()
         self.search_engine = SearchEngine()
@@ -366,9 +377,211 @@ def _cleanup_worker():
 threading.Thread(target=_cleanup_worker, daemon=True).start()
 
 
+# Add before your existing endpoints
+async def verify_token_middleware(request: Request, call_next):
+    """Verify token for protected routes"""
+    if request.url.path.startswith("/api/") and \
+       not request.url.path.startswith("/api/auth/"):
+        auth_header = request.headers.get("Authorization")
+        
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Authentication required"}
+            )
+        
+        token = auth_header.replace("Bearer ", "")
+        user = core.auth_manager.validate_token(token)
+        
+        if not user:
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Invalid or expired token"}
+            )
+        
+        # Attach user to request state
+        request.state.user = user
+    
+    response = await call_next(request)
+    return response
+
+app.middleware("http")(verify_token_middleware)
+
 # ============================================================
 # API ENDPOINTS
 # ============================================================
+
+# ============================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================
+
+@app.post("/api/auth/login")
+async def login(request: Request):
+    """User login endpoint"""
+    data = await request.json()
+    username = data.get("username")
+    password = data.get("password")
+    
+    ip_address = request.client.host
+    user_agent = request.headers.get("user-agent", "")
+    
+    result = core.auth_manager.authenticate(username, password, ip_address, user_agent)
+    
+    if result:
+        core.auth_manager.log_activity(
+            result["user_id"], "LOGIN", 
+            details=f"Successful login from {ip_address}",
+            ip_address=ip_address
+        )
+        return {"success": True, "user": result}
+    else:
+        return {"success": False, "error": "Invalid credentials"}
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    """User logout endpoint"""
+    data = await request.json()
+    token = data.get("token")
+    
+    user = core.auth_manager.validate_token(token)
+    if user:
+        core.auth_manager.log_activity(
+            user["user_id"], "LOGOUT",
+            ip_address=request.client.host
+        )
+        core.auth_manager.logout(token)
+    
+    return {"success": True}
+
+@app.post("/api/auth/validate")
+async def validate_session(request: Request):
+    """Validate session token"""
+    data = await request.json()
+    token = data.get("token")
+    
+    user = core.auth_manager.validate_token(token)
+    if user:
+        return {"valid": True, "user": user}
+    else:
+        return {"valid": False}
+
+@app.post("/api/auth/register")
+async def register(request: Request):
+    """Register new user (admin only)"""
+    data = await request.json()
+    
+    admin_token = data.get("admin_token")
+    admin = core.auth_manager.validate_token(admin_token)
+    
+    if not admin or admin["role"] != "admin":
+        return {"success": False, "error": "Unauthorized"}
+    
+    try:
+        user = core.auth_manager.create_user(
+            username=data["username"],
+            email=data["email"],
+            password=data["password"],
+            full_name=data["full_name"],
+            role=data.get("role", "viewer")
+        )
+        
+        core.auth_manager.log_activity(
+            admin["user_id"], "CREATE_USER",
+            resource_type="user", resource_id=user["user_id"],
+            details=f"Created user: {user['username']}",
+            ip_address=request.client.host
+        )
+        
+        return {"success": True, "user": user}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/log/access")
+async def log_data_access(request: Request, x_api_key: str = Header(...)):
+    """Log when user views specific data"""
+    user = await verify_token(x_api_key)
+    data = await request.json()
+    
+    core.auth_manager.log_data_access(
+        user_id=user["user_id"],
+        task_id=data.get("task_id"),
+        company_name=data.get("company_name"),
+        email_viewed=data.get("email_viewed")
+    )
+    
+    return {"success": True}
+
+@app.get("/api/admin/activity_logs")
+async def get_activity_logs(request: Request, x_api_key: str = Header(...)):
+    """Get all activity logs (admin only)"""
+    user = await verify_token(x_api_key)
+    
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    with core.db._get_connection() as conn:
+        rows = conn.execute('''
+            SELECT a.log_id, a.user_id, a.action_type, a.resource_type,
+                   a.resource_id, a.details, a.ip_address, a.timestamp,
+                   u.username, u.email
+            FROM activity_log a
+            JOIN users u ON a.user_id = u.user_id
+            ORDER BY a.timestamp DESC
+            LIMIT 100
+        ''').fetchall()
+
+    logs = []
+    for row in rows:
+        logs.append({
+            "log_id": row[0],
+            "user_id": row[1],
+            "action_type": row[2],
+            "resource_type": row[3],
+            "resource_id": row[4],
+            "details": row[5],
+            "ip_address": row[6],
+            "timestamp": row[7],
+            "username": row[8],
+            "email": row[9]
+        })
+    
+    return {"logs": logs}
+
+@app.get("/api/admin/export_logs")
+async def get_export_logs(request: Request, x_api_key: str = Header(...)):
+    """Get all export logs (admin only)"""
+    user = await verify_token(x_api_key)
+    
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    with core.db._get_connection() as conn:
+        rows = conn.execute('''
+            SELECT e.export_id, e.user_id, e.task_id, e.export_type,
+                   e.file_format, e.record_count, e.file_path, e.exported_at,
+                   u.username
+            FROM export_log e
+            JOIN users u ON e.user_id = u.user_id
+            ORDER BY e.exported_at DESC
+            LIMIT 100
+        ''').fetchall()
+
+    logs = []
+    for row in rows:
+        logs.append({
+            "export_id": row[0],
+            "user_id": row[1],
+            "task_id": row[2],
+            "export_type": row[3],
+            "file_format": row[4],
+            "record_count": row[5],
+            "file_path": row[6],
+            "exported_at": row[7],
+            "username": row[8]
+        })
+    
+    return {"logs": logs}
+
 
 # ----------------------------------------------------------
 # 1.  Task status  (polled by ExecutionPage every 2 s)
@@ -640,11 +853,16 @@ def get_job_status(task_id: str):
 # ----------------------------------------------------------
 
 @app.get("/savefile", dependencies=[Depends(verify_token)])
-def download_results(
+async def download_results(
+    request: Request,
     task_id: str = Query(...),
     format: str = Query(..., pattern="^(csv|pdf|txt)$"),
-):
+    x_api_key: str = Header(...),
+    ):
     """Generates and streams the leads export for a completed task."""
+    # Validate user
+    user = await verify_token(x_api_key)
+    
     try:
         leads = core.db.get_leads_for_task(task_id)
         if not leads:
@@ -654,16 +872,35 @@ def download_results(
             )
 
         file_path = core.output_agent.generate_file(leads, format)
+        
+        # Log the export
+        core.auth_manager.log_export(
+            user_id=user["user_id"],
+            task_id=task_id,
+            export_type="leads",
+            file_format=format,
+            record_count=len(leads),
+            file_path=os.path.basename(file_path)
+        )
+        
+        # Log activity
+        core.auth_manager.log_activity(
+            user_id=user["user_id"],
+            action_type="EXPORT",
+            resource_type="task",
+            resource_id=task_id,
+            details=f"Exported {len(leads)} leads as {format.upper()}",
+            ip_address=request.client.host
+        )
+        
         return FileResponse(
             path=file_path,
             filename=os.path.basename(file_path),
             media_type="application/octet-stream",
         )
     except ValueError as e:
-        # Unsupported format or other value errors
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        # Log the full error for debugging
         print(f"[Export Error] {type(e).__name__}: {str(e)}")
         import traceback
         traceback.print_exc()
