@@ -309,58 +309,102 @@ class ListingsSiteAgent:
         except re.error:
             item_regex = EMAIL_REGEX
 
-        # DOM attribute to read from each matched element before regex cleaning
         target_attribute = self.recipe.get("target_attribute", "text")
 
         self._log("EXTRACTING",
-                  f"Tier 1 start | selector='{primary_sel}' | "
-                  f"attr='{target_attribute}' | regex='{regex_pat}' | method={method}")
+                f"Tier 1 start | selector='{primary_sel}' | "
+                f"attr='{target_attribute}' | regex='{regex_pat}' | method={method}")
         current_url = self.base_url
 
         while current_url and pages_done < max_pages:
-            self._log("EXTRACTING", f"Tier 1 — page {pages_done + 1}: {current_url}")
+            try:
+                self._log("EXTRACTING", f"📄 Page {pages_done + 1}/{max_pages}: {current_url}")
 
-            if method == "BS4":
-                soup = self._bs4_fetch(current_url)
-                if soup is None:
-                    break
-            else:  # SELENIUM
-                if self.driver.current_url != current_url:
-                    self.driver.get(current_url)
-                
-                try:
-                    self._wait_for_selector(primary_sel)
-                except Exception as e:
-                    # Save screenshot for debugging before re-raising so the log
-                    # file always has a visual snapshot of the blocked/timeout state.
-                    self._log("EXTRACTING", f"Timeout waiting for selector. Saving debug screenshot.")
-                    self.driver.save_screenshot("timeout_debug.png")
-                    raise e
+                if method == "BS4":
+                    soup = self._bs4_fetch(current_url)
+                    if soup is None:
+                        self._log("EXTRACTING", f"❌ Failed to fetch page {pages_done + 1}, skipping")
+                        break
+                else:  # SELENIUM
+                    if self.driver.current_url != current_url:
+                        self._log("EXTRACTING", f"🌐 Navigating to: {current_url}")
+                        self.driver.get(current_url)
                     
-                soup = BeautifulSoup(self.driver.page_source, "html.parser")
+                    try:
+                        self._log("EXTRACTING", f"⏳ Waiting for selector: {primary_sel}")
+                        self._wait_for_selector(primary_sel)
+                        self._log("EXTRACTING", f"✓ Selector found, parsing page")
+                    except TimeoutException:
+                        self._log("EXTRACTING", f"⚠️ Wait selector timed out — proceeding without wait")
+                        # You can keep the screenshot line here for debugging purposes without crashing the app:
+                        self.driver.save_screenshot(f"timeout_page_{pages_done + 1}.png")
+                        
+                    soup = BeautifulSoup(self.driver.page_source, "html.parser")
 
-            # DOM-first extraction: select elements then extract via target_attribute
-            extracted: Set[str] = set()
-            for el in soup.select(primary_sel):
-                value = self._dom_extract(el, target_attribute, regex_pat)
-                if value:
-                    extracted.add(value.lower())
+                # DOM-first extraction
+                extracted: Set[str] = set()
+                elements_found = soup.select(primary_sel)
+                self._log("EXTRACTING", f"🔍 Found {len(elements_found)} elements matching selector")
+                
+                if len(elements_found) == 0:
+                    self._log("EXTRACTING", f"⚠️ WARNING: No elements matched selector '{primary_sel}'")
+                
+                for idx, el in enumerate(elements_found):
+                    value = self._dom_extract(el, target_attribute, regex_pat)
+                    if value:
+                        extracted.add(value.lower())
+                        # Log every 10th extraction to avoid spam
+                        if idx % 10 == 0 or len(elements_found) < 20:
+                            self._log("EXTRACTING", f"✓ Extracted: '{value[:50]}...'")
 
-            self._absorb_emails(extracted, current_url)
-            self._log("EXTRACTING", f"Tier 1 — found {len(extracted)} values on this page.")
+                self._absorb_emails(extracted, current_url)
+                self._log("EXTRACTING", 
+                        f"✅ Page {pages_done + 1} complete: {len(extracted)} values extracted | "
+                        f"📊 Total leads: {len(self._leads_collected)}")
 
-            if method == "BS4":
-                current_url = self._next_url_from_soup(soup, current_url)
-            else:
-                if self._is_last_page(pages_done):
-                    self._log("EXTRACTING", "Tier 1 — last page indicator found, stopping.")
+                if method == "BS4":
+                    current_url = self._next_url_from_soup(soup, current_url)
+                    if current_url:
+                        self._log("EXTRACTING", f"➡️ Next page URL: {current_url}")
+                    else:
+                        self._log("EXTRACTING", f"🏁 No more pages found")
+                else:
+                    if self._is_last_page(pages_done):
+                        self._log("EXTRACTING", "🏁 Last page indicator found, stopping")
+                        break
+                    next_url = self._selenium_next_page()
+                    if next_url:
+                        current_url = next_url
+                        self._log("EXTRACTING", f"➡️ Moving to next page")
+                    else:
+                        self._log("EXTRACTING", f"🏁 No next page button found")
+                        break
+
+                pages_done += 1
+                
+            except Exception as e:
+                self._log("EXTRACTING", f"❌ ERROR on page {pages_done + 1}: {type(e).__name__}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                
+                # Try to continue to next page
+                if method != "BS4":
+                    try:
+                        self._log("EXTRACTING", f"🔄 Attempting to recover and continue...")
+                        current_url = self._selenium_next_page()
+                        if current_url is None:
+                            self._log("EXTRACTING", f"❌ Recovery failed, stopping extraction")
+                            break
+                        pages_done += 1
+                    except:
+                        self._log("EXTRACTING", f"❌ Recovery failed, stopping extraction")
+                        break
+                else:
                     break
-                current_url = self._selenium_next_page()
-
-            pages_done += 1
 
         self._log("EXTRACTING",
-                  f"Tier 1 complete. {len(self._leads_collected)} lead records accumulated.")
+                f"🎉 Tier 1 complete. Processed {pages_done} pages. "
+                f"📊 {len(self._leads_collected)} lead records accumulated.")
 
     # =========================================================================
     # TIER 2  — Emails inside subpages
@@ -370,7 +414,7 @@ class ListingsSiteAgent:
         """
         Phase A: Walk main listing pages, collect all subpage hrefs.
         Phase B: Fetch every subpage in parallel, extract emails using
-                 the Groq-validated subpage_selector and regex_pattern.
+                the Groq-validated subpage_selector and regex_pattern.
         """
         max_pages      = self.recipe.get("max_pages", DEFAULT_MAX_PAGES)
         pages_done     = 0
@@ -383,116 +427,162 @@ class ListingsSiteAgent:
         target_attribute = self.recipe.get("target_attribute", "text")
 
         self._log("EXTRACTING",
-                  f"Tier 2 — Phase A: collecting subpage links | "
-                  f"primary='{primary_sel}' | subpage='{subpage_sel}' | regex='{regex_pat}'")
+                f"🎯 Tier 2 — Phase A: Collecting subpage links")
+        self._log("EXTRACTING",
+                f"   Primary selector: '{primary_sel}'")
+        self._log("EXTRACTING",
+                f"   Subpage selector: '{subpage_sel}'")
+        self._log("EXTRACTING",
+                f"   Regex pattern: '{regex_pat}'")
 
         all_subpage_urls: List[str] = []
 
+        # PHASE A: Collect all subpage links
         while pages_done < max_pages:
-            self._log("EXTRACTING", f"Tier 2 — main page {pages_done + 1}.")
-            
             try:
-                self._wait_for_selector(primary_sel)
+                self._log("EXTRACTING", f"📄 Main listing page {pages_done + 1}/{max_pages}")
+                
+                try:
+                    self._log("EXTRACTING", f"⏳ Waiting for selector: {primary_sel}")
+                    self._wait_for_selector(primary_sel)
+                    self._log("EXTRACTING", f"✓ Selector found, parsing page")
+                except TimeoutException:
+                    self._log("EXTRACTING", f"⚠️ Wait selector timed out — proceeding without wait")
+                    # You can keep the screenshot line here for debugging purposes without crashing the app:
+                    self.driver.save_screenshot(f"timeout_page_{pages_done + 1}.png")
+
+                if method == "BS4":
+                    soup = BeautifulSoup(self.driver.page_source, "html.parser")
+                    elements = soup.select(primary_sel)
+                    self._log("EXTRACTING", f"🔍 Found {len(elements)} listing items")
+                    
+                    for el in elements:
+                        href = el.get("href") or (el.find("a") or {}).get("href")
+                        if href:
+                            all_subpage_urls.append(urljoin(self.driver.current_url, href))
+                else:
+                    elements = self._safe_find_elements(primary_sel)
+                    self._log("EXTRACTING", f"🔍 Found {len(elements)} listing items via Selenium")
+                    
+                    for idx, el in enumerate(elements):
+                        href = el.get_attribute("href")
+                        if not href:
+                            try:
+                                from selenium.webdriver.common.by import By
+                                from selenium.common.exceptions import NoSuchElementException
+                                child = el.find_element(By.TAG_NAME, "a")
+                                href  = child.get_attribute("href")
+                            except NoSuchElementException:
+                                pass
+                        if href and not href.startswith("javascript"):
+                            all_subpage_urls.append(href)
+                            # Log every 10th link
+                            if idx % 10 == 0:
+                                self._log("EXTRACTING", f"   Found link: {href[:60]}...")
+
+                unique_count = len(set(all_subpage_urls))
+                self._log("EXTRACTING", f"📊 Total subpage links collected: {unique_count}")
+
+                if self._is_last_page(pages_done):
+                    self._log("EXTRACTING", "🏁 Last page reached")
+                    break
+                
+                next_url = self._selenium_next_page()
+                if next_url is None:
+                    self._log("EXTRACTING", "🏁 No next page button found")
+                    break
+                
+                self._log("EXTRACTING", f"➡️ Moving to page {pages_done + 2}")
+                pages_done += 1
+                
             except Exception as e:
-                self._log("EXTRACTING", f"Timeout waiting for selector. Saving debug screenshot.")
-                self.driver.save_screenshot("timeout_debug.png")
-                raise e
-
-            if method == "BS4":
-                soup = BeautifulSoup(self.driver.page_source, "html.parser")
-                for el in soup.select(primary_sel):
-                    href = el.get("href") or (el.find("a") or {}).get("href")
-                    if href:
-                        all_subpage_urls.append(urljoin(self.driver.current_url, href))
-            else:
-                elements = self._safe_find_elements(primary_sel)
-                for el in elements:
-                    href = el.get_attribute("href")
-                    if not href:
-                        try:
-                            from selenium.webdriver.common.by import By
-                            from selenium.common.exceptions import NoSuchElementException
-                            child = el.find_element(By.TAG_NAME, "a")
-                            href  = child.get_attribute("href")
-                        except NoSuchElementException:
-                            pass
-                    if href and not href.startswith("javascript"):
-                        all_subpage_urls.append(href)
-
-            self._log("EXTRACTING", f"Collected {len(all_subpage_urls)} subpage links so far.")
-
-            if self._is_last_page(pages_done):
-                self._log("EXTRACTING", "Tier 2 — last page reached, stopping link collection.")
+                self._log("EXTRACTING", f"❌ Error collecting links on page {pages_done + 1}: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 break
-            next_url = self._selenium_next_page()
-            if next_url is None:
-                break
-            pages_done += 1
 
         all_subpage_urls = list(dict.fromkeys(all_subpage_urls))
         self._log("EXTRACTING",
-                  f"Phase A done. {len(all_subpage_urls)} unique subpage URLs. "
-                  f"Starting parallel scrape…")
+                f"✅ Phase A complete: {len(all_subpage_urls)} unique subpage URLs")
+        
+        if len(all_subpage_urls) == 0:
+            self._log("EXTRACTING", "❌ No subpages found, stopping Tier 2")
+            return
 
+        # PHASE B: Scrape all subpages in parallel
+        self._log("EXTRACTING", f"🚀 Phase B: Scraping {len(all_subpage_urls)} subpages (parallel)")
+        
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        successful_scrapes = 0
+        failed_scrapes = 0
+        
         with ThreadPoolExecutor(max_workers=TIER2_MAX_WORKERS) as pool:
             futures = {
                 pool.submit(
                     self._scrape_subpage, url, subpage_sel,
-                    target_attribute, regex_pat      # pass new params
+                    target_attribute, regex_pat
                 ): url
                 for url in all_subpage_urls
             }
-            for future in as_completed(futures):
+            
+            for idx, future in enumerate(as_completed(futures)):
                 url = futures[future]
                 try:
                     result = future.result()
                     if result and result["emails"]:
-                        self._leads_collected.append({
-                            "company": self._domain_as_company(url),
-                            "emails":  result["emails"],
-                            "url":     url,
-                        })
+                        successful_scrapes += 1
+                        self._leads_collected.append(result)
+                        
+                        # Log every 10th successful scrape
+                        if successful_scrapes % 10 == 0:
+                            self._log("EXTRACTING", 
+                                    f"📈 Progress: {successful_scrapes}/{len(all_subpage_urls)} subpages scraped")
+                    else:
+                        failed_scrapes += 1
                 except Exception as e:
-                    self._log("EXTRACTING", f"Subpage error ({url}): {e}")
+                    failed_scrapes += 1
+                    if failed_scrapes % 10 == 0:
+                        self._log("EXTRACTING", f"⚠️ {failed_scrapes} subpages failed so far")
 
         self._log("EXTRACTING",
-                  f"Tier 2 complete. {len(self._leads_collected)} subpages yielded emails.")
+                f"🎉 Tier 2 complete: ✓ {successful_scrapes} successful | ❌ {failed_scrapes} failed | "
+                f"📊 Total leads: {len(self._leads_collected)}")
         
 
-    def _scrape_subpage(
-        self, url: str, subpage_selector: str,
-        target_attribute: str = "text",
-        regex_pattern: str = r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
-    ) -> Optional[Dict[str, Any]]:
+    def _scrape_subpage(self, url: str, subpage_sel: str, 
+                   target_attribute: str, regex_pat: str) -> Optional[Dict[str, Any]]:
         """
-        Thread worker: fetch a subpage and extract values using DOM parsing.
-        Uses _dom_extract() (BS4 attribute access + regex clean) rather than
-        raw regex scanning across the full page text.
+        Tier 2 worker: fetch one subpage via requests.Session, extract emails
+        using the Groq-validated subpage_selector and regex_pattern.
         """
-        soup = self._bs4_fetch(url)
-        if soup is None:
+        try:
+            resp = self._session.get(url, timeout=10)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            emails: Set[str] = set()
+            for el in soup.select(subpage_sel):
+                value = self._dom_extract(el, target_attribute, regex_pat)
+                if value and "@" in value:
+                    emails.add(value.lower())
+
+            # Also try fallback email extraction
+            emails |= self._emails_from_soup(soup)
+
+            if emails:
+                company = self._domain_as_company(url)
+                # Only log successful extractions to avoid spam
+                print(f"[Tier2] ✓ {url[:50]}: {len(emails)} email(s) from '{company}'")
+                return {"company": company, "emails": list(emails), "url": url}
+            
             return None
-
-        # Narrow to subpage_selector scope if provided; fall back to full page
-        scope = None
-        if subpage_selector:
-            try:
-                scope = soup.select_one(subpage_selector)
-            except Exception:
-                scope = None
-        search_root = scope if scope else soup
-
-        # Select all candidate elements inside the scoped area and extract
-        found: Set[str] = set()
-        # When no further child selector is available, scan all <a> for mailtos
-        # and all visible text within the scope via the dom_extract helper.
-        for el in search_root.find_all(True):  # True = all tags
-            value = self._dom_extract(el, target_attribute, regex_pattern)
-            if value:
-                found.add(value.lower())
-
-        return {"emails": list(found), "source": url}
+            
+        except Exception as e:
+            # Only log errors occasionally
+            if hash(url) % 10 == 0:  # Log 10% of errors
+                print(f"[Tier2] ❌ Failed {url[:50]}: {str(e)[:50]}")
+            return None
 
     # =========================================================================
     # TIER 3  — Company names → Serper → CompanySites
@@ -500,92 +590,96 @@ class ListingsSiteAgent:
 
     def _execute_tier_3(self):
         """
-        Harvest company names using the Groq-validated selector and regex,
-        then hand off to SearchEngine → CompanySites.
+        Extract company names, then hand them off to CompanySites agent.
         """
         max_pages   = self.recipe.get("max_pages", DEFAULT_MAX_PAGES)
         primary_sel = self.recipe.get("primary_selector", "")
-        regex_pat   = self.recipe.get("regex_pattern", r"[A-Za-z0-9 &.,()\-]+")
+        method      = self.recipe.get("method", "SELENIUM").upper()
+        regex_pat   = self.recipe.get("regex_pattern", r"[\w\s&\-\.,']+")
         pages_done  = 0
 
-        # DOM attribute to read from each matched element before regex cleaning
         target_attribute = self.recipe.get("target_attribute", "text")
 
-        self._log("EXTRACTING",
-                  f"Tier 3 start | selector='{primary_sel}' | "
-                  f"attr='{target_attribute}' | regex='{regex_pat}'")
+        self._log("EXTRACTING", f"🏢 Tier 3 — Company Name Extraction")
+        self._log("EXTRACTING", f"   Selector: '{primary_sel}'")
+        self._log("EXTRACTING", f"   Attribute: '{target_attribute}'")
+        self._log("EXTRACTING", f"   Regex: '{regex_pat}'")
 
         while pages_done < max_pages:
-            self._log("EXTRACTING", f"Tier 3 — page {pages_done + 1}.")
-            
             try:
-                self._wait_for_selector(primary_sel)
-                # Add small delay to ensure content is rendered
-                time.sleep(1)
-            except Exception as e:
-                self._log("EXTRACTING", f"Timeout waiting for selector. Saving debug screenshot.")
-                self.driver.save_screenshot("timeout_debug.png")
-                raise e
+                self._log("EXTRACTING", f"📄 Page {pages_done + 1}/{max_pages}")
                 
-            soup = BeautifulSoup(self.driver.page_source, "html.parser")
-            matched_elements = soup.select(primary_sel)
-            self._log("EXTRACTING", f"Found {len(matched_elements)} elements matching '{primary_sel}'")
+                try:
+                    self._log("EXTRACTING", f"⏳ Waiting for selector: {primary_sel}")
+                    self._wait_for_selector(primary_sel)
+                    self._log("EXTRACTING", f"✓ Selector found, parsing page")
+                except TimeoutException:
+                    self._log("EXTRACTING", f"⚠️ Wait selector timed out — proceeding without wait")
+                    # You can keep the screenshot line here for debugging purposes without crashing the app:
+                    self.driver.save_screenshot(f"timeout_page_{pages_done + 1}.png")
 
-            for el in matched_elements:
-                # DOM-first: use target_attribute then clean with regex
-                value = self._dom_extract(el, target_attribute, regex_pat)
-                self._log("EXTRACTING", f"Extracted value: '{value}' from element")
-                if value and len(value) > 1:
-                    self._company_names_set.add(value)
-                    self._log("EXTRACTING", f"Added company: '{value}'")
+                soup = BeautifulSoup(self.driver.page_source, "html.parser")
+                elements = soup.select(primary_sel)
+                self._log("EXTRACTING", f"🔍 Found {len(elements)} elements")
 
-            # Log current extraction progress before pagination
-            self._log("EXTRACTING", f"Page {pages_done + 1} complete. Collected {len(self._company_names_set)} companies so far.")
+                page_companies: Set[str] = set()
+                for idx, el in enumerate(elements):
+                    name = self._dom_extract(el, target_attribute, regex_pat)
+                    if name and len(name) > 2:
+                        name_clean = name.strip()
+                        page_companies.add(name_clean)
+                        self._company_names_set.add(name_clean)
+                        
+                        # Log every 10th company
+                        if idx % 10 == 0 or len(elements) < 20:
+                            self._log("EXTRACTING", f"   Added company: '{name_clean[:50]}'")
 
-            # Save progress checkpoint
-            pages_done += 1
-            progress_state = {
-                "page": pages_done,
-                "companies_collected": len(self._company_names_set),
-                "last_url": self.driver.current_url
-            }
-            self.core.db.update_task_progress(self.task_id, 3, progress_state)
+                self._log("EXTRACTING", 
+                        f"✅ Page {pages_done + 1}: {len(page_companies)} companies | "
+                        f"📊 Total unique: {len(self._company_names_set)}")
 
-            if self._is_last_page(pages_done):
-                self._log("EXTRACTING", "Tier 3 — last page reached, stopping harvest.")
+                if self._is_last_page(pages_done):
+                    self._log("EXTRACTING", "🏁 Last page reached")
+                    break
+                
+                next_url = self._selenium_next_page()
+                if next_url is None:
+                    self._log("EXTRACTING", "🏁 No next page found")
+                    break
+                
+                pages_done += 1
+                
+            except Exception as e:
+                self._log("EXTRACTING", f"❌ Error on page {pages_done + 1}: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 break
 
-            next_url = self._selenium_next_page()
-            if next_url is None:
-                self._log("EXTRACTING", f"No next page found. Ending at page {pages_done + 1}.")
-                break
-
+        total_companies = len(self._company_names_set)
         self._log("EXTRACTING",
-                  f"Harvested {len(self._company_names_set)} company names. "
-                  "Handing off to SearchEngine.")
+                f"🎉 Tier 3 name extraction complete: {total_companies} unique companies")
 
-        if not self._company_names_set:
-            self._log("FAILED", "No company names found. Tier 3 ending early.")
+        if total_companies == 0:
+            self._log("EXTRACTING", "❌ No companies found, stopping")
             return
 
-        contact_urls: Set[str] = self.core.search_engine.company_names(
-            self._company_names_set
-        )
-        self._log("EXTRACTING", f"SearchEngine returned {len(contact_urls)} contact URLs.")
-
-        lead_stubs = [
-            {"company": self._domain_as_company(url), "emails": [], "url": url}
-            for url in contact_urls
-        ]
-
-        self.core.company_sites_agent.company_sites(
-            self.task_id,
-            lead_stubs,
-            self.core.active_tasks[self.task_id]["industry"],
-        )
-        # DO NOT call _log here - CompanySites → output_server already set status to COMPLETED
-        # Any _log call here would overwrite it back to EXTRACTING
-        self._leads_collected = []   # CompanySites calls output_server directly
+        # Hand off to CompanySites agent
+        self._log("EXTRACTING", 
+                f"🔍 Starting Serper search for {total_companies} companies...")
+        
+        industry = self.core.active_tasks.get(self.task_id, {}).get("industry", "General")
+        
+        try:
+            self.core.company_sites_agent.company_sites(
+                task_id=self.task_id,
+                company_names=list(self._company_names_set),
+                industry=industry
+            )
+            self._log("EXTRACTING", "✅ CompanySites agent completed")
+        except Exception as e:
+            self._log("EXTRACTING", f"❌ CompanySites agent failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     # =========================================================================
     # PAGINATION HELPERS
@@ -716,44 +810,39 @@ class ListingsSiteAgent:
         Step 2: apply regex_pattern to CLEAN the raw string.
         Returns the cleaned value or None if nothing matched.
         """
-        # Sanitize regex pattern if Groq returned it as a string literal
+        # Sanitize regex pattern
         if regex_pattern.startswith('r"') or regex_pattern.startswith("r'"):
-            regex_pattern = regex_pattern[2:]  # Remove r" or r'
+            regex_pattern = regex_pattern[2:]
         if regex_pattern.endswith('"') or regex_pattern.endswith("'"):
-            regex_pattern = regex_pattern[:-1]  # Remove trailing quote
+            regex_pattern = regex_pattern[:-1]
         regex_pattern = regex_pattern.replace('\\"', '"').replace("\\'", "'")
+        
         # Step 1 — extract raw string via DOM attribute
         if target_attribute == "text":
             raw = el.get_text(separator=" ", strip=True)
         else:
-            # "href", "content", or any other HTML attribute
             raw = el.get(target_attribute, "")
             if raw:
                 raw = raw.strip()
 
         if not raw:
-            # Log empty extraction for debugging
-            if self.task_id:
-                print(f"[DEBUG] _dom_extract: empty raw value for attribute '{target_attribute}'")
+            print(f"[DEBUG] _dom_extract: empty raw value for attribute '{target_attribute}'")
             return None
 
-        # Step 2 — apply regex to clean / validate the raw string
+        # Step 2 — apply regex to clean / validate
         try:
             import re
             match = re.search(regex_pattern, raw)
-        except re.error:
-            # If the pattern is malformed just return the raw value
-            if self.task_id:
-                print(f"[DEBUG] _dom_extract: regex error, returning raw: '{raw[:50]}'")
+        except re.error as e:
+            print(f"[DEBUG] _dom_extract: regex error '{e}', returning raw: '{raw[:50]}'")
             return raw.strip() or None
 
         if not match:
-            if self.task_id:
-                print(f"[DEBUG] _dom_extract: no regex match in raw: '{raw[:50]}'")
+            # LOG THE ACTUAL CONTENT THAT DIDN'T MATCH ← ADD THIS
+            if self.task_id and len(raw) > 5:  # Only log meaningful content
+                print(f"[DEBUG] _dom_extract: no regex match. Raw content: '{raw[:100]}'")
             return None
 
-        # Prefer first capture group (e.g. r"mailto:(.*)" → strips "mailto:")
-        # Fall back to the full match when there are no groups
         clean = match.group(1) if match.groups() else match.group(0)
         return clean.strip() or None
 
@@ -836,7 +925,8 @@ class ListingsSiteAgent:
                 EC.presence_of_element_located((By.CSS_SELECTOR, selector))
             )
         except TimeoutException:
-            self._log("EXTRACTING", f"Timeout waiting for selector: {selector}")
+            self._log("EXTRACTING", f"⏱️ TIMEOUT ({WAIT_TIMEOUT}s) waiting for: {selector}")
+            raise  # Re-raise INSIDE the except block
 
     # =========================================================================
     # FINALIZATION

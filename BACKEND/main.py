@@ -139,30 +139,40 @@ class Orchestrator:
         Returns a SAFE poll payload — never includes pending_leads.
         pending_leads is only served by the dedicated /tasks/{id}/pending endpoint.
         """
-        if task_id in self.active_tasks:
-            task = self.active_tasks[task_id]
-            return {
-                "status":        task.get("status", ""),
-                "logs":          task.get("logs", []),
-                "lead_count":    task.get("lead_count", 0),
-                "company_count": task.get("company_count", 0),
-                "target_url":    task.get("target_url"),
-                "industry":      task.get("industry", "General"),
-                "error":         task.get("error"),  # ADD THIS LINE
-            }
+        try:  # ← ADD TRY-CATCH
+            if task_id in self.active_tasks:
+                task = self.active_tasks[task_id]
+                return {
+                    "status":        task.get("status", "UNKNOWN"),
+                    "logs":          task.get("logs", [])[-50:],  # Last 50 logs only
+                    "lead_count":    task.get("lead_count", 0),
+                    "company_count": task.get("company_count", 0),
+                    "target_url":    task.get("target_url"),
+                    "industry":      task.get("industry", "General"),
+                    "error":         task.get("error"),
+                }
 
-        db_data = self.db.get_task_status(task_id)
-        if db_data:
+            db_data = self.db.get_task_status(task_id)
+            if db_data:
+                return {
+                    "status":        db_data["status"].upper(),
+                    "lead_count":    db_data["lead_count"],
+                    "company_count": 0,
+                    "logs":          ["Task loaded from archive."],
+                    "target_url":    None,
+                    "industry":      db_data.get("industry", "General"),
+                    "error":         None,
+                }
+            return None
+        except Exception as e:
+            print(f"[ERROR] get_task_info failed for {task_id}: {e}")
             return {
-                "status":        db_data["status"].upper(),
-                "lead_count":    db_data["lead_count"],
+                "status": "ERROR",
+                "logs": [f"Status check failed: {str(e)}"],
+                "lead_count": 0,
                 "company_count": 0,
-                "logs":          ["Task loaded from archive."],
-                "target_url":    None,
-                "industry":      db_data.get("industry", "General"),
-                "error":         None,  # ADD THIS LINE
+                "error": str(e)
             }
-        return None
 
     # ----------------------------------------------------------
     # Centralized data handoff  (called by all agents)
@@ -588,23 +598,33 @@ async def get_export_logs(request: Request, x_api_key: str = Header(...)):
 # ----------------------------------------------------------
 
 @app.get("/tasks/{task_id}")
-async def get_task_status(task_id: str):
-    """
-    Returns live task state.
-    ExecutionPage polls this endpoint to know when to show the Training
-    Wizard, the START button, or the completed state.
-    """
-    task_data = core.get_task_info(task_id)
-    if not task_data:
-        raise HTTPException(status_code=404, detail="Task not found in memory or DB.")
-    return task_data
+def get_task_status(task_id: str):
+    """Poll endpoint for live extraction progress."""
+    try:
+        info = core.get_task_info(task_id)
+        if info is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return info
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Status poll crashed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "ERROR",
+            "logs": [f"Status check error: {str(e)}"],
+            "lead_count": 0,
+            "company_count": 0,
+            "error": str(e)
+        }
 
 
 # ----------------------------------------------------------
 # 2.  Task status PATCH  (called by VisualTrainerPage after saving recipe)
 # ----------------------------------------------------------
 
-@app.patch("/tasks/{task_id}/status", dependencies=[Depends(verify_token)])
+@app.patch("/tasks/{task_id}/status")
 async def patch_task_status(task_id: str, body: dict = Body(...)):
     """
     Allows VisualTrainerPage to signal that training is complete.
@@ -630,7 +650,7 @@ async def patch_task_status(task_id: str, body: dict = Body(...)):
 # 3.  Manual START  (called by ExecutionPage START button)
 # ----------------------------------------------------------
 
-@app.post("/tasks/{task_id}/start", dependencies=[Depends(verify_token)])
+@app.post("/tasks/{task_id}/start")
 def start_extraction(
     task_id: str,
     background_tasks: BackgroundTasks,
@@ -692,7 +712,7 @@ async def get_task_frame(task_id: str):
     return {"frame": None}
 
 
-@app.get("/tasks/{task_id}", dependencies=[Depends(verify_token)])
+@app.get("/tasks/{task_id}")
 def get_task(task_id: str):
     task = core.active_tasks.get(task_id)
     if not task:
@@ -718,7 +738,7 @@ def get_task(task_id: str):
 # 5.  Document upload
 # ----------------------------------------------------------
 
-@app.post("/upload", dependencies=[Depends(verify_token)])
+@app.post("/upload")
 def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -750,7 +770,7 @@ def upload_document(
 # 6.  Search / URL input  (main entry point from HomePage)
 # ----------------------------------------------------------
 
-@app.get("/search-listings", dependencies=[Depends(verify_token)])
+@app.get("/search-listings")
 def start_search(
     background_tasks: BackgroundTasks,
     prompt: str = Query(...),
@@ -793,7 +813,7 @@ def start_search(
 # 7.  Recipe management  (called by VisualTrainerPage._saveRecipe)
 # ----------------------------------------------------------
 
-@app.post("/recipes", dependencies=[Depends(verify_token)])
+@app.post("/recipes")
 def create_recipe(recipe: Recipe):
     """
     Persists the CSS selectors that VisualTrainerPage collected.
@@ -808,7 +828,7 @@ def create_recipe(recipe: Recipe):
     return {"status": "saved", "domain": recipe.domain}
 
 
-@app.get("/recipes/{domain}", dependencies=[Depends(verify_token)])
+@app.get("/recipes/{domain}")
 def get_recipe(domain: str):
     """Fetches the stored extraction recipe for a domain."""
     recipe = core.db.query_recipe(domain)
@@ -819,7 +839,7 @@ def get_recipe(domain: str):
     raise HTTPException(status_code=404, detail="No recipe found for this domain")
 
 
-@app.get("/recipes/check/{domain}", dependencies=[Depends(verify_token)])
+@app.get("/recipes/check/{domain}")
 def check_recipe_exists(domain: str):
     """Checks if a recipe exists for a domain without returning the full recipe."""
     recipe = core.db.query_recipe(domain)
@@ -836,7 +856,7 @@ def check_recipe_exists(domain: str):
 # 8.  Job status  (used by PastTasksPage / history view)
 # ----------------------------------------------------------
 
-@app.get("/jobs/{task_id}/status", dependencies=[Depends(verify_token)])
+@app.get("/jobs/{task_id}/status")
 def get_job_status(task_id: str):
     """
     DB-backed status for the history view.
@@ -852,7 +872,7 @@ def get_job_status(task_id: str):
 # 9.  File download
 # ----------------------------------------------------------
 
-@app.get("/savefile", dependencies=[Depends(verify_token)])
+@app.get("/savefile")
 async def download_results(
     request: Request,
     task_id: str = Query(...),
@@ -906,7 +926,7 @@ async def download_results(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
-@app.get("/leads/by-industry/{industry}", dependencies=[Depends(verify_token)])
+@app.get("/leads/by-industry/{industry}")
 def get_leads_by_industry(industry: str):
     """
     Returns all leads filtered by industry for the Browse Industry Leads page.
@@ -914,7 +934,7 @@ def get_leads_by_industry(industry: str):
     leads = core.db.get_leads_by_industry(industry)
     return leads
 
-@app.get("/leads/industries", dependencies=[Depends(verify_token)])
+@app.get("/leads/industries")
 def get_all_industries():
     """
     Returns a list of all unique industries that have leads in the database.
@@ -923,7 +943,7 @@ def get_all_industries():
     return industries
 
 
-@app.get("/tasks/{task_id}/leads", dependencies=[Depends(verify_token)])
+@app.get("/tasks/{task_id}/leads")
 def get_task_leads(task_id: str):
     """Returns the leads for a task as JSON for preview in ResultsPage."""
     leads = core.db.get_leads_for_task(task_id)
@@ -932,7 +952,7 @@ def get_task_leads(task_id: str):
     return leads
 
 
-@app.get("/tasks/{task_id}/pending", dependencies=[Depends(verify_token)])
+@app.get("/tasks/{task_id}/pending")
 def get_pending_leads(task_id: str):
     """
     Returns in-memory leads awaiting user review/classification.
@@ -944,7 +964,7 @@ def get_pending_leads(task_id: str):
     return task.get("pending_leads", [])
 
 
-@app.post("/tasks/{task_id}/confirm", dependencies=[Depends(verify_token)])
+@app.post("/tasks/{task_id}/confirm")
 def confirm_leads(task_id: str, body: dict = Body(...)):
     """
     Receives the user-classified leads from ResultsPage and writes them to DB.
@@ -1003,7 +1023,7 @@ def shutdown_event():
         except Exception:
             pass
 
-@app.post("/tasks/{task_id}/cancel", dependencies=[Depends(verify_token)])
+@app.post("/tasks/{task_id}/cancel")
 def cancel_task(task_id: str):
     """Cancels a running task."""
     if task_id in core.active_tasks:
@@ -1013,7 +1033,7 @@ def cancel_task(task_id: str):
     raise HTTPException(status_code=404, detail="Task not found or already completed")
 
 
-@app.post("/tasks/{task_id}/pause", dependencies=[Depends(verify_token)])
+@app.post("/tasks/{task_id}/pause")
 def pause_task(task_id: str):
     """Pauses a running task."""
     if task_id in core.active_tasks:
@@ -1023,7 +1043,7 @@ def pause_task(task_id: str):
     raise HTTPException(status_code=404, detail="Task not found")
 
 
-@app.post("/tasks/{task_id}/resume", dependencies=[Depends(verify_token)])
+@app.post("/tasks/{task_id}/resume")
 def resume_task(task_id: str):
     """Resumes a paused task."""
     if task_id in core.active_tasks:

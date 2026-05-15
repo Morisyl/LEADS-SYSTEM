@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'dart:math';
 
 import 'visual_trainer.dart';
 import 'results_page.dart';
@@ -122,7 +123,7 @@ class _ExecutionPageState extends State<ExecutionPage> {
     try {
       final response = await http
           .get(Uri.parse('$_baseUrl/tasks/${widget.taskId}'))
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 30));
 
       if (!mounted) return;
 
@@ -205,7 +206,7 @@ class _ExecutionPageState extends State<ExecutionPage> {
     try {
       final response = await http
           .get(Uri.parse('$_baseUrl/tasks/${widget.taskId}/frame'))
-          .timeout(const Duration(seconds: 3));
+          .timeout(const Duration(seconds: 10));
 
       if (!mounted) return;
       if (response.statusCode == 200) {
@@ -498,9 +499,9 @@ class _ExecutionPageState extends State<ExecutionPage> {
         'domain':          domain,
         'pagination_type': method.toLowerCase(),
         'selectors': {
-          'item_container': _primarySelector!.selector,
-          'next_button':    _paginationSelector?.selector ?? '',
-          'subpage':        _subpageSelector?.selector    ?? '',
+          'item_container': '',
+          'next_button':    '',
+          'subpage':        '',
         },
         'element_html': {
           'primary':    _primarySelector!.outerHtml,
@@ -563,9 +564,9 @@ class _ExecutionPageState extends State<ExecutionPage> {
     final recipe = {
       'tier':               _selectedTier,
       'site_url':           targetUrl,
-      'primary_selector':   _primarySelector?.selector    ?? '',
-      'pagination_selector':_paginationSelector?.selector ?? '',
-      'subpage_selector':   _subpageSelector?.selector    ?? '',
+      'primary_selector':   '',
+      'pagination_selector':'',
+      'subpage_selector':   '',
       'method':             _selectedTier == 1 ? 'BS4' : 'SELENIUM',
       'last_page_number':   _lastPageNumber,
       'max_pages':          _lastPageNumber,
@@ -1196,18 +1197,24 @@ Future<void> _startWithRecipe(String url, Map<String, dynamic> recipe) async {
         ),
         child: ListView.builder(
           controller: scrollController,
-          itemCount: _logs.length,
-          itemBuilder: (_, i) => Padding(
-            padding: const EdgeInsets.only(bottom: 6),
-            child: Text(
-              '> ${_logs[i]}',
-              style: const TextStyle(
-                color: Colors.greenAccent,
-                fontFamily: 'Courier',
-                fontSize: 12,
+          // Limit to 20 logs max, or the length of _logs if less than 20
+          itemCount: min(_logs.length, 20),
+          itemBuilder: (_, i) {
+            // Calculate index to get the most recent logs
+            final logIndex = _logs.length - 1 - i;
+            
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                '> ${_logs[logIndex]}',
+                style: const TextStyle(
+                  color: Colors.greenAccent,
+                  fontFamily: 'Courier',
+                  fontSize: 12,
+                ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
     );

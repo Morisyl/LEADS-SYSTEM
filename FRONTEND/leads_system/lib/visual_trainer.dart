@@ -67,25 +67,30 @@ const _inspectorJs = r"""
                   CITE:1,CODE:1,MARK:1,SUB:1,SUP:1,SVG:1,PATH:1,IMG:1,
                   BR:1,U:1,S:1,KBD:1,VAR:1,TIME:1};
 
-    function findBestTarget(node) {
-      var n = node, steps = 0, MAX = 8;
-      while (n && n !== document.body && n.nodeType === 1 && steps < MAX) {
-        var tag = n.tagName;
-        if (tag === 'A') return n;
-        if (tag === 'LI' || tag === 'TR' || tag === 'TD' || tag === 'TH') return n;
-        if (tag === 'ARTICLE' || tag === 'SECTION' || tag === 'FIGURE') return n;
-        if (tag === 'DIV' || tag === 'P' || tag === 'HEADER' ||
-            tag === 'FOOTER' || tag === 'ASIDE' || tag === 'NAV') {
-          if (n.id || (n.dataset && Object.keys(n.dataset).length) ||
-              (n.children && n.children.length >= 2)) return n;
-        }
-        if (INLINE[tag]) { n = n.parentElement; steps++; continue; }
-        if (steps > 0) return n;
-        n = n.parentElement; steps++;
-      }
-      return node;
-    }
+    // NEW — replace with this
+    function findBestTarget(raw, x, y) {
+      // Unwrap text nodes immediately.
+      if (raw.nodeType === 3) return raw.parentElement || raw;
 
+      // Use elementFromPoint with coordinates passed directly from the event.
+      // Temporarily remove the inspector styles so they don't absorb the hit test.
+      if (x !== undefined && y !== undefined) {
+        var style = document.getElementById('__leads_style');
+        var navKill = document.getElementById('__nav_kill');
+        var savedStyle  = style   ? style.textContent   : '';
+        var savedNavKill = navKill ? navKill.textContent : '';
+        if (style)   style.textContent   = '';
+        if (navKill) navKill.textContent  = '';
+        var deep = document.elementFromPoint(x, y);
+        if (style)   style.textContent   = savedStyle;
+        if (navKill) navKill.textContent  = savedNavKill;
+        if (deep && deep !== document.documentElement && deep !== document.body) {
+          return deep;
+        }
+      }
+
+      return raw;
+    }
     // ── CSS path builder ──────────────────────────────────────────────────────
     function cssPath(el) {
       if (!el || el.nodeType !== 1) return '';
@@ -95,7 +100,7 @@ const _inspectorJs = r"""
         if (el.id) { s += '#' + el.id; path.unshift(s); break; }
         if (el.className) {
           var cls = Array.from(el.classList)
-            .filter(function(c){ return c && !/^__leads/.test(c); })
+            .filter(function(c){ return c && !/^__/.test(c); })
             .slice(0, 3).join('.');
           if (cls) s += '.' + cls;
         }
@@ -147,8 +152,10 @@ const _inspectorJs = r"""
 
     // ── Hover ─────────────────────────────────────────────────────────────────
     document.addEventListener('mouseover', function(e) {
+      window.__leadsLastX = e.clientX;
+      window.__leadsLastY = e.clientY;
       if (window.__leadsLocked) return;
-      var best = findBestTarget(e.target);
+      var best = findBestTarget(e.target, e.clientX, e.clientY);
       if (hovered && hovered !== best) hovered.classList.remove('__lh');
       hovered = best;
       if (hovered) hovered.classList.add('__lh');
@@ -162,7 +169,7 @@ const _inspectorJs = r"""
       }
     }, true);
 
-    // ── LAYER 2: mousedown — before browser finalises navigation ─────────────
+    // ── LAYER 2: mousedown — capture the element ───────────────────────────
     document.addEventListener('mousedown', function(e) {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -171,25 +178,41 @@ const _inspectorJs = r"""
       if (prev) prev.classList.remove('__ll');
       if (hovered) hovered.classList.remove('__lh');
 
-      var target = findBestTarget(e.target);
+      var target = findBestTarget(e.target, e.clientX, e.clientY);
       target.classList.add('__ll');
 
-      var sel  = cssPath(target);
-      var html = (target.innerHTML || '').substring(0, 3000);
+      var html = (target.outerHTML || '').substring(0, 800);
 
-      window.__leadsSelector = sel;
+      window.__leadsSelector = '__manual__';
       window.__leadsHtml     = html;
       window.__leadsLocked   = true;
 
       var short = target.tagName.toLowerCase();
       if (target.className) {
         var fc = Array.from(target.classList)
-          .filter(function(c){ return !/^__leads/.test(c); })[0];
+          .filter(function(c){ return !/^__/.test(c); })[0];
         if (fc) short += '.' + fc;
       }
       badge.textContent = '✓ LOCKED: ' + short;
       badge.style.display = 'block';
       banner.textContent  = '✓  ' + sel + ' — click RE-PICK to choose again';
+    }, true);
+
+    // Block click as secondary defence
+    document.addEventListener('click', function(e) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }, true);
+
+    // Block form submits
+    document.addEventListener('submit', function(e) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }, true);
+
+    // Allow right-click (DevTools)
+    document.addEventListener('contextmenu', function(e) {
+      e.stopImmediatePropagation()
     }, true);
 
     // Block click as secondary defence
@@ -368,9 +391,10 @@ class _VisualTrainerPageState extends State<VisualTrainerPage> {
           final rawHtml = await wv.evaluateJavaScript('window.__leadsHtml||""');
           if (!mounted) return;
           final sel  = (rawSel  ?? '').toString().replaceAll(RegExp(r'^"|"$'), '').trim();
-          final html = (rawHtml ?? '').toString().replaceAll(RegExp(r'^"|"$'), '').trim();
-          if (sel.isNotEmpty && sel != _liveSelector) {
-            setState(() { _liveSelector = sel; _liveHtml = html; });
+          String html = (rawHtml ?? '').toString().replaceAll(RegExp(r'^"|"$'), '').trim();
+          html = _cleanHtml(html);
+          if (html.isNotEmpty && html != _liveHtml) {
+            setState(() { _liveSelector = '__manual__'; _liveHtml = html; });
           }
         } on Exception catch (e) {
           if (e.toString().contains('can not find webview')) {
@@ -455,7 +479,9 @@ class _VisualTrainerPageState extends State<VisualTrainerPage> {
       _pollTimer?.cancel();
       _injectTimer?.cancel();
       _webview?.close();
-      Navigator.pop(context, '$sel|$html');
+      // Derive simple selector from HTML like manual mode does
+      String derivedSelector = '__manual__';
+      Navigator.pop(context, '$derivedSelector|$html');
     }
   }
   
@@ -470,6 +496,24 @@ class _VisualTrainerPageState extends State<VisualTrainerPage> {
       );
     } catch (_) {}
     setState(() { _liveSelector = null; _liveHtml = null; });
+  }
+
+
+  // ── Clean raw webview HTML before storage / dispatch ───────────────────────
+  // desktop_webview_window unicode-escapes < > & " when returning JS strings.
+  // We also strip the __ll / __lh inspector classes so Groq never sees them.
+  String _cleanHtml(String raw) {
+    return raw
+        .replaceAll(r'\"', '"')           // ← ADD THIS FIRST — literal \" → "
+        .replaceAll(r'\u003C', '<')
+        .replaceAll(r'\u003E', '>')
+        .replaceAll(r'\u0026', '&')
+        .replaceAll(r'\u0022', '"')
+        .replaceAll(r'\u003c', '<')
+        .replaceAll(r'\u003e', '>')
+        .replaceAll(RegExp(r'\s*\b__ll\b'), '')
+        .replaceAll(RegExp(r'\s*\b__lh\b'), '')
+        .trim();
   }
 
   // ── Build ───────────────────────────────────────────────────────────────────
@@ -894,13 +938,7 @@ class _VisualTrainerPageState extends State<VisualTrainerPage> {
         ]),
         const SizedBox(height: 10),
 
-        const Text('CSS SELECTOR',
-            style: TextStyle(color: Colors.white38, fontSize: 10,
-                fontWeight: FontWeight.bold, letterSpacing: 1)),
-        const SizedBox(height: 4),
-        SelectableText(_liveSelector ?? '',
-            style: const TextStyle(
-                color: Colors.greenAccent, fontFamily: 'Courier', fontSize: 12)),
+        
 
         if ((_liveHtml ?? '').isNotEmpty) ...[
           const SizedBox(height: 12),
